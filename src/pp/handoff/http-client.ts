@@ -62,11 +62,41 @@ export class HttpPdlTaskIngestionPort implements PdlTaskIngestionPort {
       return data as PdlTaskIngestionResult;
     } catch (err: any) {
       if (err.name === 'AbortError') {
-        throw new Error(`PDL_HANDOFF_TIMEOUT: Request to PDL timed out after ${this.timeoutMs}ms`);
+        const timeoutErr = new Error(`PDL_HANDOFF_TIMEOUT: Request to PDL timed out after ${this.timeoutMs}ms`);
+        (timeoutErr as any).status = 504;
+        throw timeoutErr;
       }
-      throw err;
+      if (err.message?.startsWith('PDL_HANDOFF_')) {
+        throw err;
+      }
+      const netErr = new Error(`PDL_HANDOFF_FAILED: Network error communicating with PDL API: ${err.message}`);
+      (netErr as any).status = 502;
+      (netErr as any).cause = err;
+      throw netErr;
     } finally {
       clearTimeout(timer);
     }
+  }
+}
+
+export class FailClosedPdlTaskIngestionPort implements PdlTaskIngestionPort {
+  async ingest(_request: PdlTaskIngestionRequest): Promise<PdlTaskIngestionResult> {
+    const error = new Error('PDL_HANDOFF_NOT_CONFIGURED: PDL_API_URL environment variable is not set. Standalone PP cannot hand off tasks to PDL.');
+    (error as any).status = 503;
+    throw error;
+  }
+}
+
+export class StubPdlTaskIngestionPort implements PdlTaskIngestionPort {
+  async ingest(req: PdlTaskIngestionRequest): Promise<PdlTaskIngestionResult> {
+    return {
+      id: `pdl-promoted-${Date.now()}`,
+      taskId: `pdl-promoted-${Date.now()}`,
+      status: 'QUEUED',
+      branch: req.branch,
+      repository: req.repository,
+      prototypeSessionId: req.prototypeSessionId,
+      note: 'Standalone PP mode: task accepted by boundary stub',
+    };
   }
 }

@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { Pool } from 'pg';
 import { PostgresPpTaskRepository } from '../persistence/task-repository.js';
@@ -14,6 +15,7 @@ import { PrototypeComparisonPreviewManager } from '../preview/comparison-preview
 import { LocalPreviewRuntime } from '../preview/local-preview-runtime.js';
 import { PublicPreviewRuntime } from '../preview/public-preview-runtime.js';
 import { PrototypeHandoffService, type PrototypeHandoffInput, type PdlTaskIngestionPort } from '../handoff/handoff.js';
+import { HttpPdlTaskIngestionPort, FailClosedPdlTaskIngestionPort } from '../handoff/http-client.js';
 
 export const createPpApp = (
   pool?: Pool,
@@ -51,19 +53,11 @@ export const createPpApp = (
   const app = express();
   app.use(express.json());
 
-  const handoffPort: PdlTaskIngestionPort = pdlHandoff ?? {
-    async ingest(req) {
-      return {
-        id: `pdl-promoted-${Date.now()}`,
-        taskId: `pdl-promoted-${Date.now()}`,
-        status: 'QUEUED',
-        branch: req.branch,
-        repository: req.repository,
-        prototypeSessionId: req.prototypeSessionId,
-        note: 'Standalone PP mode: task accepted by boundary stub',
-      };
-    },
-  };
+  const defaultHandoffPort: PdlTaskIngestionPort = process.env.PDL_API_URL
+    ? new HttpPdlTaskIngestionPort(process.env.PDL_API_URL)
+    : new FailClosedPdlTaskIngestionPort();
+
+  const handoffPort: PdlTaskIngestionPort = pdlHandoff ?? defaultHandoffPort;
   const handoff = new PrototypeHandoffService(handoffPort, protoRepo, prototypeEvents);
 
   // Healthcheck dedicado do PP
@@ -283,6 +277,16 @@ export const createPpApp = (
       const message = e instanceof Error ? e.message : String(e);
       if (message.startsWith('NOT_FOUND:')) return res.sendStatus(404);
       if (message.startsWith('CONFLICT:')) return res.status(409).json({ error: message.replace(/^CONFLICT:\s*/, '') });
+      if (message.startsWith('PDL_HANDOFF_') || (e as any)?.status) {
+        const status = (e as any).status ?? 502;
+        const code = (e as any).status === 503
+          ? 'PDL_HANDOFF_NOT_CONFIGURED'
+          : (message.includes('TIMEOUT') ? 'PDL_HANDOFF_TIMEOUT' : 'PDL_HANDOFF_FAILED');
+        return res.status(status >= 400 && status < 600 ? status : 502).json({
+          error: message,
+          code,
+        });
+      }
       return next(e);
     }
   });
@@ -290,10 +294,20 @@ export const createPpApp = (
   return app;
 };
 
-const isDirectRun = process.argv[1]?.endsWith('pp-api-entry.ts') || process.argv[1]?.endsWith('pp-api-entry.js');
+const currentFile = fileURLToPath(import.meta.url);
+const entryFile = process.argv[1] ? path.resolve(process.argv[1]) : '';
+const isDirectRun = Boolean(entryFile && currentFile === entryFile) ||
+  process.argv[1]?.endsWith('entry.ts') ||
+  process.argv[1]?.endsWith('entry.js') ||
+  process.argv[1]?.endsWith('pp-api-entry.ts') ||
+  process.argv[1]?.endsWith('pp-api-entry.js') ||
+  process.env.RUN_PP_API === 'true';
+
 if (isDirectRun) {
-  const port = Number(process.env.PP_API_PORT ?? 3001);
-  const app = createPpApp();
+  const port = Number(process.env.PP_API_PORT ?? process.env.PORT ?? 3001);
+  const dbUrl = process.env.DATABASE_URL;
+  const pool = dbUrl ? new Pool({ connectionString: dbUrl }) : undefined;
+  const app = createPpApp(pool);
   app.listen(port, '0.0.0.0', () => {
     console.log(`[PP API] Dedicated server listening on 0.0.0.0:${port}`);
   });

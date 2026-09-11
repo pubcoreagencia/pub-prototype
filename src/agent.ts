@@ -1,4 +1,4 @@
-﻿import type { Task } from './domain.js';
+import type { Task } from './domain.js';
 import { CodexApiProvider } from './providers/codex-api.js';
 import { RouterProvider } from './providers/router.js';
 import { OpenRouterProvider } from './providers/openrouter.js';
@@ -10,15 +10,28 @@ export class MockProvider implements AgentProvider {
   readonly kind = 'mock' as const;
   readonly model = null;
   async execute(task: Task | ProviderTaskInput, _workspace: string): Promise<ProviderTaskResult> {
+    let changedFiles: string[] = [];
+    if (_workspace) {
+      try {
+        const { writeFileSync, existsSync } = await import('node:fs');
+        const { join } = await import('node:path');
+        const htmlFile = join(_workspace, 'index.html');
+        const content = existsSync(htmlFile)
+          ? `<!DOCTYPE html><html><body><h1>Prototype Iteration</h1><p>${task.prompt || ''}</p></body></html>\n`
+          : `<!DOCTYPE html><html><body><h1>Prototype MVP</h1><p>${task.prompt || ''}</p></body></html>\n`;
+        writeFileSync(htmlFile, content, 'utf8');
+        changedFiles = ['index.html'];
+      } catch {}
+    }
     return {
       status: 'COMPLETED',
       provider: this.kind,
       model: null,
       exitCode: 0,
       durationMs: 0,
-      stdout: `Mock provider completed task ${task.id}; no source changes were made.`,
+      stdout: `Mock provider completed task ${task.id}; updated files: ${changedFiles.join(', ')}`,
       stderr: '',
-      changedFiles: [],
+      changedFiles,
       commit: null,
       errorCode: null,
       errorMessage: null,

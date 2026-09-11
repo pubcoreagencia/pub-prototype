@@ -146,4 +146,168 @@ describe('HttpPdlTaskIngestionPort', () => {
       type: 'PROMOTED_TO_DEVELOPMENT',
     }));
   });
+
+  it('5. FailClosedPdlTaskIngestionPort throws PDL_HANDOFF_NOT_CONFIGURED when PDL_API_URL is missing', async () => {
+    const { FailClosedPdlTaskIngestionPort } = await import('../src/pp/handoff/http-client.js');
+    const client = new FailClosedPdlTaskIngestionPort();
+
+    await expect(client.ingest(sampleRequest)).rejects.toThrow(/PDL_HANDOFF_NOT_CONFIGURED/);
+  });
+
+  it('6. Fails closed with HTTP 500 error from PDL', async () => {
+    const mockFetch = vi.fn(async () => {
+      return new Response(JSON.stringify({
+        error: 'Internal PDL ingestion crash',
+      }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const client = new HttpPdlTaskIngestionPort('http://localhost:3000', { fetchFn: mockFetch });
+
+    await expect(client.ingest(sampleRequest)).rejects.toThrow(/PDL_HANDOFF_FAILED: Internal PDL ingestion crash/);
+  });
+
+  it('7. Standalone PP API without PDL_API_URL fails closed on POST /prototype/sessions/:id/promote', async () => {
+    const originalEnv = process.env.PDL_API_URL;
+    delete process.env.PDL_API_URL;
+
+    try {
+      const { createPpApp } = await import('../src/pp/api/entry.js');
+      const mockPrototypes: any = {
+        getSession: async (id: string) => ({
+          id,
+          project: 'fail-closed-proj',
+          repository: 'https://github.com/test/test.git',
+          branch: 'prototype/branch',
+          lastCheckpointSha: 'sha-abc',
+          status: 'READY',
+          mode: 'PROTOTYPE',
+        }),
+        promoteSession: async (id: string) => ({
+          id,
+          project: 'fail-closed-proj',
+          repository: 'https://github.com/test/test.git',
+          branch: 'prototype/branch',
+          lastCheckpointSha: 'sha-abc',
+          status: 'PROMOTED',
+          mode: 'DEVELOPMENT',
+        }),
+        createPromotion: async (p: any) => ({ id: 'promo-fail', ...p }),
+      };
+
+      const app = createPpApp(undefined, undefined, mockPrototypes);
+
+      // Make a synthetic request to express app
+      const req = {
+        method: 'POST',
+        url: '/prototype/sessions/sess-123/promote',
+        headers: { 'content-type': 'application/json' },
+        body: {},
+        params: { id: 'sess-123' },
+      };
+
+      let responseStatus = 0;
+      let responseBody: any = null;
+      const res: any = {
+        status(code: number) {
+          responseStatus = code;
+          return this;
+        },
+        json(data: any) {
+          responseBody = data;
+          return this;
+        },
+        sendStatus(code: number) {
+          responseStatus = code;
+          return this;
+        },
+      };
+
+      // Find route handler directly
+      const router = (app as any)._router ?? (app as any).router;
+      const route = router.stack.find((layer: any) => layer.route?.path === '/prototype/sessions/:id/promote')?.route;
+      expect(route).toBeDefined();
+
+      const handler = route.stack[0].handle;
+      await handler(req, res, (err: any) => { if (err) throw err; });
+
+      expect(responseStatus).toBe(503);
+      expect(responseBody.code).toBe('PDL_HANDOFF_NOT_CONFIGURED');
+    } finally {
+      if (originalEnv) process.env.PDL_API_URL = originalEnv;
+    }
+  });
+
+  it('8. Duplicate promotion is idempotent and succeeds with existing promotion record', async () => {
+    let ingestCallCount = 0;
+    const mockHandoffPort = {
+      async ingest(req: any) {
+        ingestCallCount++;
+        return {
+          id: 'pdl-task-idempotent-1',
+          taskId: 'pdl-task-idempotent-1',
+          status: 'QUEUED',
+          branch: req.branch,
+          repository: req.repository,
+          prototypeSessionId: req.prototypeSessionId,
+        };
+      },
+    };
+
+    const existingPromotion = {
+      id: 'promo-idempotent-1',
+      sessionId: 'sess-idem',
+      fromMode: 'PROTOTYPE',
+      toMode: 'DEVELOPMENT',
+      repository: 'https://github.com/pubcoreagencia/test-repo.git',
+      branch: 'prototype/branch',
+      checkpointSha: 'sha-idem',
+      promotedAt: new Date(),
+    };
+
+    let sessionStatus = 'READY';
+    const mockPrototypes: any = {
+      getSession: async () => ({
+        id: 'sess-idem',
+        project: 'idem-proj',
+        repository: 'https://github.com/pubcoreagencia/test-repo.git',
+        branch: 'prototype/branch',
+        lastCheckpointSha: 'sha-idem',
+        status: sessionStatus,
+        mode: sessionStatus === 'PROMOTED' ? 'DEVELOPMENT' : 'PROTOTYPE',
+      }),
+      promoteSession: async () => {
+        if (sessionStatus === 'PROMOTED') return null;
+        sessionStatus = 'PROMOTED';
+        return {
+          id: 'sess-idem',
+          project: 'idem-proj',
+          repository: 'https://github.com/pubcoreagencia/test-repo.git',
+          branch: 'prototype/branch',
+          lastCheckpointSha: 'sha-idem',
+          status: 'PROMOTED',
+          mode: 'DEVELOPMENT',
+        };
+      },
+      createPromotion: async () => existingPromotion,
+      getPromotion: async () => existingPromotion,
+    };
+
+    const mockEvents: any = { emit: vi.fn() };
+    const { PrototypeHandoffService } = await import('../src/pp/handoff/handoff.js');
+    const service = new PrototypeHandoffService(mockHandoffPort as any, mockPrototypes, mockEvents);
+
+    // First promotion
+    const firstResult = await service.execute({ sessionId: 'sess-idem' });
+    expect(firstResult.session.status).toBe('PROMOTED');
+    expect(firstResult.promotion.id).toBe('promo-idempotent-1');
+
+    // Second promotion (duplicate)
+    const secondResult = await service.execute({ sessionId: 'sess-idem' });
+    expect(secondResult.session.status).toBe('PROMOTED');
+    expect(secondResult.promotion.id).toBe('promo-idempotent-1');
+    expect(secondResult.task.id).toBe('pdl-task-idempotent-1');
+  });
 });
