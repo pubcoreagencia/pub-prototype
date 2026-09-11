@@ -1,4 +1,4 @@
-﻿# PUB PROTOTYPE (PP) — ARCHITECTURE GUIDE
+# PUB PROTOTYPE (PP) — ARCHITECTURE GUIDE
 
 ## 1. System Mission & Scope
 The **PUB Prototype** system provides rapid iteration, live multi-file previews, and conversational evolution of web and backend prototypes. It serves as the rapid-prototyping precursor to the formal engineering workflow of **PUB Dev Loop (PDL)**.
@@ -64,9 +64,20 @@ The **PUB Prototype** system provides rapid iteration, live multi-file previews,
 - **Node.js Preview Runtime**: Spawns isolated Node processes, binds to dedicated localhost ports, performs health checks, and lifecycle-manages child processes.
 
 ### 3.4 Promotion / Handoff (`src/pp/handoff/`)
-- When a prototype reaches production readiness, the user initiates a promotion.
-- PP captures the checkpoint snapshot and dispatches a promotion payload across the decoupled `PdlTaskIngestionPort` boundary.
-- The reference to the downstream PDL task is stored as a correlation ID (`pdl_task_id`), preserving loose coupling without foreign keys.
+- When a prototype reaches production readiness, the user initiates a promotion via `POST /prototype/sessions/:id/promote`.
+- PP captures the checkpoint snapshot, creates a promotion record in `prototype_promotions`, and dispatches the payload across the decoupled `PdlTaskIngestionPort` boundary.
+- **Transport**: `HttpPdlTaskIngestionPort` dispatches over HTTP `POST /tasks/ingest` to PDL API.
+- **Request Contract (`PdlTaskIngestionRequest`)**:
+  - `project`, `repository`, `branch`, `checkpointSha`, `promotionId`, `prototypeSessionId`, `objective`, `prompt`, `priority` (optional).
+- **Result Contract (`PdlTaskIngestionResult`)**:
+  - `id`, `taskId`, `status`, `branch`, `repository`, `prototypeSessionId`, `result`.
+- **Ownership & Correlation**:
+  - PP owns: `promotionId`, `prototypeSessionId`, `checkpointSha`.
+  - PDL owns: `pdlTaskId` (`id`/`taskId`), `status`, `ExecutionSpec`.
+  - Zero shared database foreign keys.
+- **Idempotency & Failure Semantics**:
+  - Same `promotionId` guarantees exact same PDL task is returned without duplicate task creation.
+  - Failures on HTTP 4xx (validation/malformed) fail closed immediately; network errors/timeouts raise `PDL_HANDOFF_TIMEOUT` / `PDL_HANDOFF_FAILED`.
 
 ---
 
@@ -89,5 +100,6 @@ All database migrations reside in `db/migrations/` and use sequential 3-digit pr
 
 ## 5. Clean Boundary Guarantees
 - Zero physical foreign keys to tables outside the prototype schema.
-- Zero imports from `src/pdl/**`.
+- Zero compile-time or runtime imports from `src/pdl/**`.
 - Autonomous test suite runnable with in-memory or dedicated Postgres instances.
+- Untrusted product intent handed over through neutral boundary contract; PDL enforces engineering execution authority and trust boundaries.

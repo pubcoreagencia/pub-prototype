@@ -3,3 +3,5 @@ export * from './events/events.js';
 export * from './events/bridge.js';
 export * from './preview/preview-runtime.js';
 export * from './preview/local-preview-runtime.js';
+export * from './handoff/handoff.js';
+export * from './handoff/http-client.js';
