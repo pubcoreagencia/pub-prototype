@@ -625,7 +625,7 @@ export class ToolRuntime {
    * Get list of changed files (relative to workspace).
    */
   getChangedFiles(): string[] {
-    return Array.from(this.changedFiles);
+    return Array.from(this.changedFiles).map(f => f.replace(/\\/g, '/'));
   }
 
   /**
