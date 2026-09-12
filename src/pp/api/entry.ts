@@ -60,8 +60,38 @@ export const createPpApp = (
   const handoffPort: PdlTaskIngestionPort = pdlHandoff ?? defaultHandoffPort;
   const handoff = new PrototypeHandoffService(handoffPort, protoRepo, prototypeEvents);
 
-  // Healthcheck dedicado do PP
-  app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'pp-api' }));
+  // Healthcheck dedicado do PP (Liveness)
+  app.get('/health', (_req, res) => res.json({
+    status: 'ok',
+    service: 'pp-api',
+    name: 'PP API',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+  }));
+
+  // Readiness dedicado do PP (Database connectivity + Handoff readiness)
+  app.get('/ready', async (_req, res) => {
+    try {
+      await activePool.query('SELECT 1');
+      return res.json({
+        status: 'ready',
+        service: 'pp-api',
+        name: 'PP API',
+        database: 'connected',
+        handoffConfigured: Boolean(process.env.PDL_API_URL),
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      return res.status(503).json({
+        status: 'not_ready',
+        service: 'pp-api',
+        name: 'PP API',
+        database: 'disconnected',
+        error: err.message,
+      });
+    }
+  });
 
   // UI do Prototype
   app.get(['/prototype', '/prototype/sessions/:id/view'], (_req, res) => {

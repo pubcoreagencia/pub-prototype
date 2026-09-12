@@ -117,6 +117,7 @@ export class PostgresPpTaskRepository implements PpTaskRepository {
         WITH candidate AS (
           SELECT id FROM prototype_tasks
           WHERE status = 'QUEUED'
+             OR (status IN ('ASSIGNED', 'RUNNING') AND lease_deadline IS NOT NULL AND lease_deadline < now())
           ORDER BY priority DESC, created_at ASC
           FOR UPDATE SKIP LOCKED LIMIT 1
         )
@@ -128,8 +129,9 @@ export class PostgresPpTaskRepository implements PpTaskRepository {
       console.warn('[PostgresPpTaskRepository] DB issue on claim, using fallback:', err.message);
     }
 
+    const now = new Date();
     for (const task of sovereignFallbackPpTasks.values()) {
-      if (task.status === 'QUEUED') {
+      if (task.status === 'QUEUED' || (['ASSIGNED', 'RUNNING'].includes(task.status) && task.leaseDeadline && task.leaseDeadline < now)) {
         task.status = 'ASSIGNED';
         task.worker = worker;
         task.leaseOwner = worker;

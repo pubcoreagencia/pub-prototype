@@ -22,7 +22,7 @@ export function createPrototypeWorkerDaemon(pool: Pool): PrototypeWorker {
   return new PrototypeWorker(tasks, prototypes, provider, events);
 }
 
-export function startPrototypeHealthServer(port = PORT): http.Server {
+export function startPrototypeHealthServer(port = PORT, poolGetter?: () => Pool | undefined): http.Server {
   const server = http.createServer(async (req, res) => {
     // Internal endpoint for preview recovery (called by API Worker)
     if (req.method === 'POST' && req.url === '/internal/prototype/preview/refresh') {
@@ -85,14 +85,43 @@ export function startPrototypeHealthServer(port = PORT): http.Server {
       return;
     }
 
+    if (req.url === '/ready') {
+      try {
+        const pool = poolGetter?.();
+        if (pool) {
+          await pool.query('SELECT 1');
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          status: 'ready',
+          service: 'pp-worker',
+          name: 'PP Worker',
+          database: pool ? 'connected' : 'uninitialized',
+          provider: process.env.AGENT_PROVIDER || 'default',
+          uptime: process.uptime(),
+          timestamp: new Date().toISOString(),
+        }));
+      } catch (err: any) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          status: 'not_ready',
+          service: 'pp-worker',
+          name: 'PP Worker',
+          error: err.message,
+        }));
+      }
+      return;
+    }
+
     // Default health check
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'ok',
+      service: 'pp-worker',
+      name: 'PP Worker',
       worker: 'PUB Prototype Dedicated Worker',
       uptime: process.uptime(),
       timestamp: new Date().toISOString(),
-      service: 'pp-worker',
       env: {
         DATABASE_URL: process.env.DATABASE_URL ? 'SET' : 'EMPTY',
         PROTOTYPE_BOT_TOKEN: process.env.PROTOTYPE_BOT_TOKEN ? 'SET' : 'EMPTY',
@@ -117,7 +146,8 @@ const entryFile = process.argv[1] ? path.resolve(process.argv[1]) : '';
 const isMain = Boolean(entryFile && currentFile === entryFile) || process.env.RUN_PP_WORKER === 'true';
 
 if (isMain) {
-  startPrototypeHealthServer();
+  let activePool: Pool | undefined;
+  startPrototypeHealthServer(PORT, () => activePool);
 
   const dbUrl = process.env.DATABASE_URL;
   if (!dbUrl) {
@@ -126,12 +156,12 @@ if (isMain) {
     try {
       configureGitCredentials();
       const isLocal = dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1');
-      const pool = new Pool({
+      activePool = new Pool({
         connectionString: dbUrl,
         ssl: isLocal ? false : { rejectUnauthorized: false },
       });
 
-      const worker = createPrototypeWorkerDaemon(pool);
+      const worker = createPrototypeWorkerDaemon(activePool);
 
       console.log(JSON.stringify({
         event: 'PP_WORKER_STARTED',
@@ -139,15 +169,35 @@ if (isMain) {
         intervalMs: POLL_INTERVAL_MS,
       }));
 
+      let isShuttingDown = false;
+      let cycleTimer: NodeJS.Timeout | null = null;
+
       const runCycle = async () => {
+        if (isShuttingDown) return;
         try {
           await worker.executeOnce();
         } catch (e) {
           console.error('[PP Worker] Cycle error:', (e as Error).message);
         } finally {
-          setTimeout(runCycle, POLL_INTERVAL_MS);
+          if (!isShuttingDown) {
+            cycleTimer = setTimeout(runCycle, POLL_INTERVAL_MS);
+          }
         }
       };
+
+      const shutdown = async (signal: string) => {
+        if (isShuttingDown) return;
+        isShuttingDown = true;
+        console.log(`[PP Worker] Received ${signal}, graceful shutdown initiated...`);
+        if (cycleTimer) clearTimeout(cycleTimer);
+        try {
+          if (activePool) await activePool.end();
+        } catch {}
+        process.exit(0);
+      };
+
+      process.on('SIGTERM', () => shutdown('SIGTERM'));
+      process.on('SIGINT', () => shutdown('SIGINT'));
 
       runCycle();
     } catch (err) {
