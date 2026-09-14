@@ -203,7 +203,8 @@ export class LocalPreviewRuntime implements PreviewRuntime {
       return this.startStaticServer(record);
     }
 
-    const env = { ...process.env, ...(record.config.environment ?? {}), PORT: String(record.config.port) };
+    const { buildPreviewEnvironment } = await import('./env-scrubber.js');
+    const env = buildPreviewEnvironment(process.env, record.config.environment, record.config.port);
     const child = spawn(record.config.command, resolveArgs(record.config.args, record.config.port), {
       cwd: record.config.workspace,
       env,
