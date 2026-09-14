@@ -817,25 +817,34 @@ async function loadSession(id) {
   $('sessionBox').textContent = sessionId;
   $('chat').innerHTML = '';
   checkpoints = [...(data.checkpoints || [])];
-  const messages = data.messages || [];
-  messages.forEach(m => { 
-    const role = m.role === 'user' ? 'user' : (m.role === 'assistant' || m.role === 'agent') ? 'agent' : 'system'; 
-    addMessage(role, m.content || '', m.createdAt || m.timestamp); 
-  });
-  if (!messages.length) renderChatEmpty();
+  const messages = data.messages && data.messages.length ? data.messages : null;
+  if (messages) {
+    messages.forEach(m => {
+      const role = m.role === 'user' ? 'user' : (m.role === 'assistant' || m.role === 'agent') ? 'agent' : 'system';
+      addMessage(role, m.content || '', m.createdAt || m.timestamp);
+    });
+  } else {
+    // Reconstruct history from tasks when messages are not available
+    const completedTasks = (data.tasks || []).filter(t => t.status === 'COMPLETED' || t.status === 'FAILED');
+    completedTasks.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    completedTasks.forEach(t => {
+      if (t.prompt) addMessage('user', t.prompt, t.createdAt);
+      const summary = t.result?.finalize?.summary || t.result?.summary || t.objective || null;
+      if (summary) addMessage('agent', summary, t.updatedAt || t.createdAt);
+    });
+    if (!completedTasks.length) renderChatEmpty();
+  }
   $('chatHeaderStatus').textContent = data.session.status === 'READY' ? 'Pronto' : data.session.status;
   $('chatHeaderMeta').querySelector('.dot').style.background = data.session.status === 'FAILED' ? 'var(--danger)' : 'var(--success)';
   renderProjects();
 
-  // Instantly load and show the live preview iframe
-  var directPreviewUrl = '/prototype/sessions/' + encodeURIComponent(id) + '/preview/';
-  const iframe = $('iframe');
-  if (iframe) {
-    iframe.src = directPreviewUrl;
-    iframe.style.display = 'block';
+  // Load live preview using the public URL stored in session (e.g. cloudflared tunnel)
+  const sessionPreviewUrl = data.session.previewUrl || (checkpoints.length && checkpoints[checkpoints.length - 1].previewUrl) || null;
+  if (sessionPreviewUrl) {
+    renderPreview(sessionPreviewUrl);
+  } else {
+    setPreviewState('idle');
   }
-  setPreviewState('ready');
-  $('previewUrl').textContent = directPreviewUrl;
 
   const activeTask = (data.tasks || []).find(t => ['QUEUED','ASSIGNED','RUNNING','TESTING'].includes(t.status));
   if (activeTask) {
@@ -935,7 +944,10 @@ function attachEvents(id) {
       const ev = JSON.parse(e.data);
       const eventSessionId = ev.payload?.sessionId;
       if (eventSessionId && eventSessionId !== sessionId) return;
-      var directUrl = '/prototype/sessions/' + encodeURIComponent(sessionId) + '/preview/';
+      // Use the public URL from the event payload (e.g. cloudflared tunnel URL)
+      var directUrl = ev.payload?.url || (checkpoints.length && checkpoints[checkpoints.length - 1].previewUrl) || null;
+      if (!directUrl) return;
+
       addTimeline([{label: 'Seu pedido', status: 'done'}, {label: 'Agente iniciado', status: 'done'}, {label: 'Gerando código', status: 'done'}, {label: 'Build aprovado', status: 'done'}, {label: 'Subindo preview', status: 'active'}]);
       currentUrl = null;
       renderPreview(directUrl);
@@ -1087,11 +1099,13 @@ function startLivePoll(sessId) {
         if (dot) dot.style.background = 'var(--success)';
         updateSendButton();
 
-        // Atualiza preview em tempo real
-        const directPreviewUrl = '/prototype/sessions/' + encodeURIComponent(sessId) + '/preview/';
-        const iframe = $('iframe');
-        if (iframe) iframe.src = directPreviewUrl;
-        setPreviewState('ready');
+        // Atualiza preview em tempo real usando a URL pública da sessão
+        const pollPreviewUrl = data.session?.previewUrl || currentUrl;
+        if (pollPreviewUrl && pollPreviewUrl !== currentUrl) {
+          renderPreview(pollPreviewUrl);
+        } else if (currentUrl) {
+          setPreviewState('ready');
+        }
       }
     } catch (err) {
       console.warn('[LivePoll] Erro ao sincronizar sessão:', err);
@@ -1144,18 +1158,16 @@ async function send() {
 
 // === PREVIEW CONTROLS ===
 $('refresh').addEventListener('click', () => {
-  if (sessionId) {
-    const directPreviewUrl = '/prototype/sessions/' + encodeURIComponent(sessionId) + '/preview/';
-    const iframe = $('iframe');
-    if (iframe) iframe.src = directPreviewUrl;
-    setPreviewState('ready');
+  if (currentUrl) {
+    renderPreview(currentUrl);
+  } else if (sessionId) {
+    triggerPreviewRecovery(sessionId);
   }
 });
 
 $('open').addEventListener('click', () => {
-  if (sessionId) {
-    const directPreviewUrl = '/prototype/sessions/' + encodeURIComponent(sessionId) + '/preview/';
-    window.open(directPreviewUrl, '_blank', 'noopener,noreferrer');
+  if (currentUrl) {
+    window.open(currentUrl, '_blank', 'noopener,noreferrer');
   }
 });
 

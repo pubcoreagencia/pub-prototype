@@ -1,7 +1,7 @@
 export function prototypeHistoryUiScript(): string {
   return `<script>
 (() => {
-  const root = document.querySelector('.meta');
+  const root = document.querySelector('.sidebar-footer');
   if (!root) return;
   let state = { sessionId: localStorage.getItem('pub-prototype:last-session'), checkpoints: [], comparisonId: null };
   const panel = document.createElement('div');
