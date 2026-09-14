@@ -250,7 +250,23 @@ export class PublicPreviewRuntime implements PreviewRuntime {
     if (!record) return null;
 
     if (record.tunnel?.pid) {
-      try { process.kill(-record.tunnel.pid, 'SIGTERM'); } catch { record.tunnel.kill('SIGTERM'); }
+      const tunnel = record.tunnel;
+      try { const pid = tunnel.pid; if (pid) process.kill(-pid, 'SIGTERM'); else tunnel.kill('SIGTERM'); } catch { tunnel.kill('SIGTERM'); }
+      
+      await new Promise<void>(resolve => {
+        const timeout = setTimeout(() => {
+          try {
+            const pid = tunnel.pid;
+            if (pid) process.kill(-pid, 'SIGKILL');
+            else tunnel.kill('SIGKILL');
+          } catch {
+            tunnel.kill('SIGKILL');
+          }
+          resolve();
+        }, 1_500);
+        tunnel.once('exit', () => { clearTimeout(timeout); resolve(); });
+      });
+
       record.tunnel = null;
     }
 

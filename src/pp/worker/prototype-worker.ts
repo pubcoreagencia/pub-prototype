@@ -49,6 +49,7 @@ function parseRestore(prompt: string): { commitSha: string; checkpointId: string
 export class PrototypeWorker {
   private state = 'IDLE';
   private readonly preview: PreviewRuntime;
+  private readonly cleanupTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(
     private readonly tasks: PpTaskRepository,
@@ -70,6 +71,11 @@ export class PrototypeWorker {
   async executeOnce(): Promise<boolean> {
     const task = await this.tasks.claim(this.name);
     if (!task) return false;
+
+    if (this.cleanupTimers.has(task.prototypeSessionId!)) {
+      clearTimeout(this.cleanupTimers.get(task.prototypeSessionId!)!);
+      this.cleanupTimers.delete(task.prototypeSessionId!);
+    }
 
     const sessionId = task.prototypeSessionId!;
     const workspace = workspaceFor(task);
@@ -404,19 +410,57 @@ export class PrototypeWorker {
       }));
 
       await this.tasks.update(task.id, { status: 'COMPLETED' });
+      task.status = 'COMPLETED'; // Update local object for finally block
       await this.events.emit({ sessionId, type: 'CHECKPOINT_CREATED', payload: checkpoint as unknown as Record<string, unknown> });
       await this.events.emit({ sessionId, type: 'PREVIEW_READY', payload: { sessionId, url: preview.url, runtimeId: preview.id, port: preview.port } });
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await this.tasks.update(task.id, { status: 'FAILED', error: message.slice(0, 4000), workspacePath: workspace, leaseOwner: null, leaseDeadline: null });
+      task.status = 'FAILED'; // Update local object for finally block
       await this.prototypes.updateSession(sessionId, { status: 'FAILED', workspacePath: workspace });
       await this.events.emit({ sessionId, type: 'ERROR', payload: { message, taskId: task.id } });
       return true;
     } finally {
+      this.scheduleCleanup(sessionId, workspace, task.status);
       clearInterval(heartbeat);
       this.state = 'IDLE';
     }
+  }
+
+  private scheduleCleanup(sessionId: string, workspace: string, taskStatus: string) {
+    // If the task was completed successfully, its status in the DB is 'COMPLETED', but the `task` object
+    // might have the old status. The caller should pass the *final* status.
+    const isSuccess = taskStatus === 'COMPLETED';
+    // Justificativa para 15 minutos: Oferece janela segura e razoável para interação inicial
+    // do usuário com o preview resultante da task sem derrubar as sessões. Mantém idempotência.
+    // Falhas/cancelamentos derrubam instantaneamente para sanear processos zumbis.
+    const delayMs = isSuccess ? 15 * 60 * 1000 : 0;
+
+    const timer = setTimeout(async () => {
+      try {
+        if (this.cleanupTimers.get(sessionId) !== timer) return;
+
+        const session = await this.prototypes.getSession(sessionId);
+        if (session && ['BUILDING', 'PREVIEWING'].includes(session.status)) {
+          return;
+        }
+
+        if (session?.previewRuntime) {
+          await this.preview.destroy(session.previewRuntime);
+        }
+        const { rm } = await import('node:fs/promises');
+        await rm(workspace, { recursive: true, force: true });
+      } catch (e) {
+        console.error('[PP Worker] Cleanup failed:', e);
+      } finally {
+        if (this.cleanupTimers.get(sessionId) === timer) {
+          this.cleanupTimers.delete(sessionId);
+        }
+      }
+    }, delayMs);
+    
+    this.cleanupTimers.set(sessionId, timer);
   }
 
   private async restoreCheckpoint(task: PrototypeTask, workspace: string, branch: string): Promise<boolean> {

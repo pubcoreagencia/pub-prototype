@@ -7,7 +7,11 @@ describe('Preview Environment Isolation (P0-A)', () => {
       PATH: '/usr/bin',
       DATABASE_URL: 'postgres://user:pass@localhost:5432/db',
       OPENROUTER_API_KEY: 'sk-12345',
-      SOME_SECRET: 'secret-value'
+      SOME_SECRET: 'secret-value',
+      GITHUB_TOKEN: 'ghp_123',
+      AWS_ACCESS_KEY_ID: 'AKIA...',
+      NPM_TOKEN: 'npm_123',
+      PROTOTYPE_BOT_TOKEN: 'bot_123'
     };
     
     const env = buildPreviewEnvironment(parentEnv, {}, 3000);
@@ -16,6 +20,10 @@ describe('Preview Environment Isolation (P0-A)', () => {
     expect(env.DATABASE_URL).toBeUndefined();
     expect(env.OPENROUTER_API_KEY).toBeUndefined();
     expect(env.SOME_SECRET).toBeUndefined();
+    expect(env.GITHUB_TOKEN).toBeUndefined();
+    expect(env.AWS_ACCESS_KEY_ID).toBeUndefined();
+    expect(env.NPM_TOKEN).toBeUndefined();
+    expect(env.PROTOTYPE_BOT_TOKEN).toBeUndefined();
   });
 
   it('applies PORT correctly', () => {
@@ -35,15 +43,28 @@ describe('Preview Environment Isolation (P0-A)', () => {
     expect(env.HOME).toBe('/home/user');
   });
 
-  it('allows explicit configuration via configEnv', () => {
-    const env = buildPreviewEnvironment({}, { NODE_ENV: 'development', CUSTOM_VAR: '123' }, 3000);
+  it('allows explicit arbitrary configuration via configEnv (denylist approach)', () => {
+    const env = buildPreviewEnvironment({}, { NODE_ENV: 'development', CUSTOM_VAR: '123', VITE_API_URL: 'http://api' }, 3000);
     expect(env.NODE_ENV).toBe('development');
     expect(env.CUSTOM_VAR).toBe('123');
+    expect(env.VITE_API_URL).toBe('http://api');
   });
 
   it('prevents configEnv from reintroducing critical secrets', () => {
-    const env = buildPreviewEnvironment({}, { DATABASE_URL: 'malicious', GITHUB_TOKEN: 'leak' }, 3000);
+    const env = buildPreviewEnvironment({}, { 
+      DATABASE_URL: 'malicious', 
+      GITHUB_TOKEN: 'leak',
+      AWS_SECRET_ACCESS_KEY: 'leak',
+      OPENROUTER_API_KEY: 'leak',
+      NPM_TOKEN: 'leak',
+      PROTOTYPE_BOT_TOKEN: 'leak'
+    }, 3000);
+    
     expect(env.DATABASE_URL).toBeUndefined();
     expect(env.GITHUB_TOKEN).toBeUndefined();
+    expect(env.AWS_SECRET_ACCESS_KEY).toBeUndefined();
+    expect(env.OPENROUTER_API_KEY).toBeUndefined();
+    expect(env.NPM_TOKEN).toBeUndefined();
+    expect(env.PROTOTYPE_BOT_TOKEN).toBeUndefined();
   });
 });

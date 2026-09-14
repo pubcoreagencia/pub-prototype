@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "pub-prototype",
   "version": "0.1.0",
   "private": true,
@@ -7,6 +7,8 @@
     "dev": "tsx src/pp/api/entry.ts",
     "pp:api": "tsx src/pp/api/entry.ts",
     "pp:worker": "tsx src/pp/worker/entry.ts",
+    "start:api": "node dist/pp/api/entry.js",
+    "start:worker": "node dist/pp/worker/entry.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
