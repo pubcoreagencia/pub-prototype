@@ -3,6 +3,8 @@ import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
+import rateLimit from 'express-rate-limit';
 import { Pool } from 'pg';
 import { PostgresPpTaskRepository } from '../persistence/task-repository.js';
 import type { PpTaskRepository } from '../domain/domain.js';
@@ -51,7 +53,40 @@ export const createPpApp = (
   }
 
   const app = express();
+  app.set('trust proxy', 1);
+  
+  // Structured JSON access logging middleware
+  app.use((req, res, next) => {
+    const requestId = crypto.randomUUID();
+    req.headers['x-request-id'] = requestId;
+    const start = Date.now();
+    res.on('finish', () => {
+      // Do not log /health or /ready to avoid log spam, unless desired.
+      // But requirement says "all unexpected errors... and access logging". We'll log everything for now or maybe skip health? We'll log everything.
+      if (req.path !== '/health' && req.path !== '/ready') {
+        console.log(JSON.stringify({
+          timestamp: new Date().toISOString(),
+          request_id: requestId,
+          method: req.method,
+          path: req.path,
+          status: res.statusCode,
+          duration_ms: Date.now() - start
+        }));
+      }
+    });
+    next();
+  });
+
   app.use(express.json());
+
+  // API Rate Limiting for sensitive endpoints
+  const sessionRateLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 50,
+    message: { error: 'Too many requests, please try again later.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
 
   const defaultHandoffPort: PdlTaskIngestionPort = process.env.PDL_API_URL
     ? new HttpPdlTaskIngestionPort(process.env.PDL_API_URL)
@@ -99,7 +134,7 @@ export const createPpApp = (
   });
 
   // POST /prototype/sessions
-  app.post('/prototype/sessions', async (req, res, next) => {
+  app.post('/prototype/sessions', sessionRateLimiter, async (req, res, next) => {
     try {
       const { project, repository, branch } = req.body ?? {};
       if (!project) return res.status(400).json({ error: 'project is required' });
@@ -174,9 +209,9 @@ export const createPpApp = (
   });
 
   // POST /prototype/sessions/:id/prompts
-  app.post('/prototype/sessions/:id/prompts', async (req, res, next) => {
+  app.post('/prototype/sessions/:id/prompts', sessionRateLimiter, async (req, res, next) => {
     try {
-      const session = await protoRepo.getSession(req.params.id);
+      const session = await protoRepo.getSession(String(req.params.id));
       if (!session) return res.sendStatus(404);
       const { objective = 'Prototype MVP iteration', prompt, priority } = req.body ?? {};
       if (!prompt) return res.status(400).json({ error: 'prompt is required' });
@@ -319,6 +354,27 @@ export const createPpApp = (
       }
       return next(e);
     }
+  });
+
+  // Global structured JSON error handler
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    // If headers are already sent, delegate to default error handler
+    if (res.headersSent) {
+      return next(err);
+    }
+    const status = err.status || err.statusCode || 500;
+    const message = status >= 500 ? 'Internal server error' : err.message;
+    const requestId = req.headers['x-request-id'] || 'unknown';
+    if (status >= 500) {
+      console.error(JSON.stringify({
+        timestamp: new Date().toISOString(),
+        request_id: requestId,
+        level: 'error',
+        message: err.message,
+        stack: err.stack,
+      }));
+    }
+    res.status(status).json({ error: message, requestId });
   });
 
   return app;

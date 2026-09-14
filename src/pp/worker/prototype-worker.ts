@@ -233,9 +233,15 @@ export class PrototypeWorker {
         model: initialModel || (this.provider as any).model || 'default',
       });
 
-      const result = await this.provider.execute(taskWithInstructions, workspace, {
+      const timeoutMs = 120 * 1000;
+      const executePromise = this.provider.execute(taskWithInstructions, workspace, {
         consumer: sink,
       });
+      const timeoutPromise = new Promise<any>((_, reject) =>
+        setTimeout(() => reject(new Error('AI Provider execution timed out after 120 seconds')), timeoutMs)
+      );
+
+      const result = await Promise.race([executePromise, timeoutPromise]);
 
       // If provider completed, emit attempt_completed before closing bridge
       if (result.status === 'COMPLETED') {
