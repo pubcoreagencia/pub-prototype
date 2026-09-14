@@ -4,7 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { PrototypeTask, PpTaskRepository } from '../domain/domain.js';
 import { TaskFinalizer, captureWorkspaceSnapshot } from '../../finalizer.js';
-import type { AgentProvider, ProviderTaskInput } from '../../providers/types.js';
+import type { AgentProvider, ProviderTaskInput, ProviderTaskResult } from '../../providers/types.js';
 import { PREVIEW_SYSTEM_INSTRUCTIONS } from './prompts.js';
 import type { PrototypeEventPublisher } from '../events/events.js';
 import { PostgresPrototypeRepository } from '../persistence/repository.js';
@@ -234,14 +234,36 @@ export class PrototypeWorker {
       });
 
       const timeoutMs = 120 * 1000;
-      const executePromise = this.provider.execute(taskWithInstructions, workspace, {
-        consumer: sink,
-      });
-      const timeoutPromise = new Promise<any>((_, reject) =>
-        setTimeout(() => reject(new Error('AI Provider execution timed out after 120 seconds')), timeoutMs)
-      );
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-      const result = await Promise.race([executePromise, timeoutPromise]);
+      let result: ProviderTaskResult;
+      try {
+        result = await this.provider.execute(taskWithInstructions, workspace, {
+          consumer: sink,
+          signal: controller.signal,
+        });
+      } catch (e: any) {
+        if (controller.signal.aborted) {
+          result = {
+            status: 'TIMED_OUT',
+            provider: this.provider.kind || 'openrouter',
+            model: initialModel || (this.provider as any).model || 'default',
+            exitCode: null,
+            durationMs: timeoutMs,
+            stdout: '',
+            stderr: 'AI Provider execution timed out after 120 seconds',
+            changedFiles: [],
+            commit: null,
+            errorCode: 'EXECUTION_TIMEOUT',
+            errorMessage: 'AI Provider execution timed out after 120 seconds',
+          };
+        } else {
+          throw e;
+        }
+      } finally {
+        clearTimeout(timer);
+      }
 
       // If provider completed, emit attempt_completed before closing bridge
       if (result.status === 'COMPLETED') {
