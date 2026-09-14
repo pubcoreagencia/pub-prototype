@@ -566,6 +566,28 @@ export class OpenRouterProvider implements AgentProvider {
         if (!modelFound) break;
       }
       clearTimeout(timer);
+      if (toolRounds >= this.maxToolRounds) {
+        return {
+          status: 'TOOL_LOOP_LIMIT',
+          provider: this.kind,
+          model: modelUsed,
+          exitCode: null,
+          durationMs: Date.now() - started,
+          stdout: finalMessage,
+          stderr: `Exceeded max tool rounds (${this.maxToolRounds})`,
+          changedFiles: runtime.getChangedFiles(),
+          commit: null,
+          errorCode: 'TOOL_LOOP_LIMIT',
+          errorMessage: `Exceeded max tool rounds (${this.maxToolRounds})`,
+          toolCalls: totalToolCalls,
+          toolRounds: toolRounds,
+          promptTokens: accumulatedPromptTokens || undefined,
+          completionTokens: accumulatedCompletionTokens || undefined,
+          totalTokens: accumulatedTotalTokens || undefined,
+          costUsd: accumulatedCostUsd,
+          modelAttempts: modelAttempts,
+        };
+      }
       return {
         status: 'FAILED',
         provider: this.kind,

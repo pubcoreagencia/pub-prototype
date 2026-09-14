@@ -433,12 +433,20 @@ export class PrototypeWorker {
         timestamp: new Date().toISOString(),
       }));
 
-      if (result.status !== 'COMPLETED') {
+      const isToolLoopWithChanges = result.status === 'TOOL_LOOP_LIMIT' && (result.changedFiles?.length ?? 0) > 0;
+
+      if (result.status !== 'COMPLETED' && !isToolLoopWithChanges) {
         const message = result.errorMessage ?? result.stderr ?? 'Prototype agent failed';
         await this.tasks.update(task.id, { status: 'FAILED', error: message.slice(0, 4000), workspacePath: workspace,
           result: { provider: result.provider, model: result.model, stdout: result.stdout, stderr: result.stderr, durationMs },
           leaseOwner: null, leaseDeadline: null });
-        await this.prototypes.updateSession(sessionId, { status: 'FAILED', workspacePath: workspace });
+
+        const session = await this.prototypes.getSession(sessionId);
+        const hasPriorFunctionalState = Boolean(session?.lastCheckpointSha || session?.previewUrl);
+        await this.prototypes.updateSession(sessionId, {
+          status: hasPriorFunctionalState ? 'READY' : 'FAILED',
+          workspacePath: workspace,
+        });
         await this.events.emit({ sessionId, type: 'ERROR', payload: { message, taskId: task.id } });
         return true;
       }
@@ -487,18 +495,25 @@ export class PrototypeWorker {
           },
         );
         if (decision !== 'SUCCESS') {
+          const session = await this.prototypes.getSession(sessionId);
+          const hasPriorFunctionalState = Boolean(session?.lastCheckpointSha || session?.previewUrl);
+          const finalError = finalize.errorMessage ?? (result.status === 'TOOL_LOOP_LIMIT' ? 'Tool loop limit reached and finalization failed' : 'Prototype finalization failed');
+
           // Escalation – treat as a regular failure
           await this.tasks.update(task.id, {
             status: 'FAILED',
             branch,
             workspacePath: workspace,
             gitStatus: finalize.gitStatus,
-            error: finalize.errorMessage ?? 'Prototype finalization failed',
+            error: finalError,
             result: { finalize, provider: result.provider, model: result.model, durationMs },
             leaseOwner: null,
             leaseDeadline: null,
           });
-          await this.prototypes.updateSession(sessionId, { status: 'FAILED', workspacePath: workspace });
+          await this.prototypes.updateSession(sessionId, {
+            status: hasPriorFunctionalState ? 'READY' : 'FAILED',
+            workspacePath: workspace,
+          });
           await this.events.emit({
             sessionId,
             type: 'BUILD_FAILED',
@@ -533,11 +548,19 @@ export class PrototypeWorker {
       // Save assistant message to the chat history linked to the task_id
       try {
         if (typeof this.prototypes.addMessage === 'function') {
+          const defaultMsg = result.status === 'TOOL_LOOP_LIMIT'
+            ? 'Protótipo atualizado (limite de rodadas de ferramentas atingido).'
+            : 'Protótipo atualizado com sucesso.';
+          const content = result.stdout
+            ? (result.status === 'TOOL_LOOP_LIMIT' && !result.stdout.includes('limite')
+                ? `${result.stdout}\n\n*(Aviso: Limite de rodadas de ferramentas atingido)*`
+                : result.stdout)
+            : defaultMsg;
           await this.prototypes.addMessage({
             id: randomUUID(),
             sessionId,
             role: 'assistant',
-            content: result.stdout || 'Protótipo atualizado com sucesso.',
+            content,
             taskId: task.id,
             order: 0,
             createdAt: new Date(),
@@ -568,7 +591,13 @@ export class PrototypeWorker {
       const message = error instanceof Error ? error.message : String(error);
       await this.tasks.update(task.id, { status: 'FAILED', error: message.slice(0, 4000), workspacePath: workspace, leaseOwner: null, leaseDeadline: null });
       task.status = 'FAILED'; // Update local object for finally block
-      await this.prototypes.updateSession(sessionId, { status: 'FAILED', workspacePath: workspace });
+
+      const session = await this.prototypes.getSession(sessionId);
+      const hasPriorFunctionalState = Boolean(session?.lastCheckpointSha || session?.previewUrl);
+      await this.prototypes.updateSession(sessionId, {
+        status: hasPriorFunctionalState ? 'READY' : 'FAILED',
+        workspacePath: workspace,
+      });
       await this.events.emit({ sessionId, type: 'ERROR', payload: { message, taskId: task.id } });
       return true;
     } finally {
@@ -578,14 +607,21 @@ export class PrototypeWorker {
     }
   }
 
-  private scheduleCleanup(sessionId: string, workspace: string, taskStatus: string) {
+  private async scheduleCleanup(sessionId: string, workspace: string, taskStatus: string) {
     // If the task was completed successfully, its status in the DB is 'COMPLETED', but the `task` object
     // might have the old status. The caller should pass the *final* status.
     const isSuccess = taskStatus === 'COMPLETED';
-    // Justificativa para 15 minutos: Oferece janela segura e razoável para interação inicial
-    // do usuário com o preview resultante da task sem derrubar as sessões. Mantém idempotência.
-    // Falhas/cancelamentos derrubam instantaneamente para sanear processos zumbis.
-    const delayMs = isSuccess ? 15 * 60 * 1000 : 0;
+    let hasPriorFunctionalState = false;
+    try {
+      const session = await this.prototypes.getSession(sessionId);
+      hasPriorFunctionalState = Boolean(session?.lastCheckpointSha || session?.previewUrl);
+    } catch {
+      // Ignore repository lookup error
+    }
+
+    // Preserve preview if the task completed successfully OR if there is a prior working checkpoint/preview.
+    // Only destroy immediately (delay 0) if there is NO working state to preserve.
+    const delayMs = (isSuccess || hasPriorFunctionalState) ? 15 * 60 * 1000 : 0;
 
     const timer = setTimeout(async () => {
       try {
