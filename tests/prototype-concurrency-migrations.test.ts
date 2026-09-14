@@ -1,4 +1,4 @@
-﻿import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +18,7 @@ describe('PUB Prototype â€” Concurrency, Migrations & Preview Error Handlin
         '002_prototype_events.sql',
         '003_prototype_promotions.sql',
         '004_prototype_messages.sql',
+        '005_workspaces_projects_and_files.sql',
       ]);
 
       // Check each migration SQL for idempotency constructs

@@ -1,9 +1,25 @@
 import type { Pool } from 'pg';
 import { randomUUID } from 'node:crypto';
-import type { CreatePrototypeSession, PrototypeCheckpoint, PrototypeSession, PrototypeSessionStatus, PrototypeMode, PrototypePromotion, PrototypeMessage } from '../domain/domain.js';
+import type {
+  CreatePrototypeSession,
+  PrototypeCheckpoint,
+  PrototypeSession,
+  PrototypeSessionStatus,
+  PrototypeMode,
+  PrototypePromotion,
+  PrototypeMessage,
+  User,
+  Workspace,
+  WorkspaceMember,
+  WorkspaceRole,
+  Project,
+  ProjectStatus,
+  CheckpointFile,
+} from '../domain/domain.js';
 
 const mapSession = (r: Record<string, unknown>): PrototypeSession => ({
   id: r.id as string,
+  projectId: (r.project_id as string) || null,
   project: r.project as string,
   repository: r.repository as string,
   branch: r.branch as string,
@@ -22,6 +38,39 @@ const mapCheckpoint = (r: Record<string, unknown>): PrototypeCheckpoint => ({
   id: r.id as string, sessionId: r.session_id as string, promptIndex: r.prompt_index as number,
   prompt: r.prompt as string, commitSha: r.commit_sha as string | null,
   previewUrl: r.preview_url as string | null, buildPassed: r.build_passed as boolean, createdAt: r.created_at as Date,
+});
+
+const mapProject = (r: Record<string, unknown>): Project => ({
+  id: r.id as string,
+  workspaceId: r.workspace_id as string,
+  name: r.name as string,
+  description: (r.description as string) || '',
+  status: (r.status as ProjectStatus) || 'ACTIVE',
+  githubRepository: (r.github_repository as string) || null,
+  githubBranch: (r.github_branch as string) || null,
+  supabaseProjectReference: (r.supabase_project_reference as string) || null,
+  createdAt: r.created_at as Date,
+  updatedAt: r.updated_at as Date,
+});
+
+const mapWorkspace = (r: Record<string, unknown>): Workspace => ({
+  id: r.id as string,
+  name: r.name as string,
+  slug: r.slug as string,
+  ownerId: (r.owner_id as string) || '00000000-0000-0000-0000-000000000000',
+  createdAt: r.created_at as Date,
+  updatedAt: r.updated_at as Date,
+});
+
+const mapCheckpointFile = (r: Record<string, unknown>): CheckpointFile => ({
+  id: r.id as string,
+  checkpointId: r.checkpoint_id as string,
+  sessionId: r.session_id as string,
+  path: r.path as string,
+  content: r.content as string,
+  contentType: (r.content_type as string) || 'text/plain',
+  sizeBytes: Number(r.size_bytes || 0),
+  createdAt: r.created_at as Date,
 });
 
 const mapPromotion = (r: Record<string, unknown>): PrototypePromotion => ({
@@ -60,13 +109,45 @@ export interface PrototypeRepository {
   listMessages(sessionId: string): Promise<PrototypeMessage[]>;
   nextMessageOrder(sessionId: string): Promise<number>;
 
+  // PP 2.0 Workspaces & Projects
+  listWorkspaces(userId?: string): Promise<Workspace[]>;
+  createWorkspace(input: { name: string; slug?: string; ownerId?: string }): Promise<Workspace>;
+  getWorkspace(id: string): Promise<Workspace | null>;
+  listProjects(workspaceId?: string): Promise<Project[]>;
+  createProject(input: { workspaceId?: string; name: string; description?: string; githubRepository?: string; githubBranch?: string }): Promise<Project>;
+  getProject(id: string): Promise<Project | null>;
+  updateProject(id: string, patch: Partial<Pick<Project, 'name' | 'description' | 'status' | 'githubRepository' | 'githubBranch'>>): Promise<Project | null>;
+  deleteProject(id: string): Promise<boolean>;
+
+  // PP 2.0 Checkpoint Files for Native Preview & Code Inspector
+  saveCheckpointFiles(files: CheckpointFile[]): Promise<void>;
+  listCheckpointFiles(checkpointId: string): Promise<CheckpointFile[]>;
+  getCheckpointFile(checkpointId: string, path: string): Promise<CheckpointFile | null>;
+  listSessionFiles(sessionId: string): Promise<CheckpointFile[]>;
+  getLatestSessionFile(sessionId: string, path: string): Promise<CheckpointFile | null>;
+  initializeSchema(): Promise<void>;
 }
 
 // Sovereign in-memory fallback store to ensure zero downtime when database quota is reached
+const DEFAULT_USER_ID = '00000000-0000-0000-0000-000000000000';
+const DEFAULT_WORKSPACE_ID = '11111111-1111-1111-1111-111111111111';
+
+const fallbackWorkspaces = new Map<string, Workspace>();
+const fallbackProjects = new Map<string, Project>();
 const fallbackSessions = new Map<string, PrototypeSession>();
 const fallbackCheckpoints = new Map<string, PrototypeCheckpoint[]>();
 const fallbackPromotions = new Map<string, PrototypePromotion>();
 const fallbackMessages = new Map<string, PrototypeMessage[]>();
+const fallbackCheckpointFiles = new Map<string, CheckpointFile[]>();
+
+fallbackWorkspaces.set(DEFAULT_WORKSPACE_ID, {
+  id: DEFAULT_WORKSPACE_ID,
+  name: 'Default Workspace',
+  slug: 'default-workspace',
+  ownerId: DEFAULT_USER_ID,
+  createdAt: new Date('2026-08-28T12:00:00.000Z'),
+  updatedAt: new Date('2026-08-28T12:00:00.000Z'),
+});
 
 const RECOVERED_GIT_SESSIONS: Array<{ id: string; project: string; branch: string }> = [
   { id: "0b91af99-f7d8-42f1-87f5-2740d50045fb", project: "app-eletricista-live", branch: "prototype/app-eletricista-live/0b91af99-f7d8-42f1-87f5-2740d50045fb" },
@@ -93,8 +174,24 @@ const RECOVERED_GIT_SESSIONS: Array<{ id: string; project: string; branch: strin
 ];
 
 for (const s of RECOVERED_GIT_SESSIONS) {
+  const projectId = `proj-${s.id}`;
+  if (!fallbackProjects.has(projectId)) {
+    fallbackProjects.set(projectId, {
+      id: projectId,
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      name: s.project,
+      description: '',
+      status: 'ACTIVE',
+      githubRepository: 'https://github.com/pubcoreagencia/pub-dev-loop-prototypes.git',
+      githubBranch: s.branch,
+      supabaseProjectReference: null,
+      createdAt: new Date('2026-08-28T12:00:00.000Z'),
+      updatedAt: new Date('2026-08-28T12:00:00.000Z'),
+    });
+  }
   fallbackSessions.set(s.id, {
     id: s.id,
+    projectId,
     project: s.project,
     repository: 'https://github.com/pubcoreagencia/pub-dev-loop-prototypes.git',
     branch: s.branch,
@@ -117,10 +214,30 @@ export class PostgresPrototypeRepository implements PrototypeRepository {
     const id = randomUUID();
     const sanitizedProject = input.project.replace(/[^a-zA-Z0-9-_]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
     const branch = input.branch ?? `prototype/${sanitizedProject || 'untitled'}/${id}`;
+    let projectId: string | null = input.projectId ?? null;
+
     try {
+      if (!projectId) {
+        // Auto-link or create project in default workspace
+        const existingProj = await this.pool.query(
+          `SELECT id FROM projects WHERE name = $1 LIMIT 1`,
+          [input.project]
+        );
+        if (existingProj?.rows?.[0]) {
+          projectId = existingProj.rows[0].id;
+        } else {
+          const newProj = await this.createProject({
+            name: input.project,
+            githubRepository: input.repository,
+            githubBranch: branch,
+          });
+          projectId = newProj.id;
+        }
+      }
+
       const result = await this.pool.query(
-        `INSERT INTO prototype_sessions (id, project, repository, branch) VALUES ($1,$2,$3,$4) RETURNING *`,
-        [id, input.project, input.repository, branch]
+        `INSERT INTO prototype_sessions (id, project_id, project, repository, branch) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+        [id, projectId, input.project, input.repository, branch]
       );
       if (result?.rows?.[0]) {
         const session = mapSession(result.rows[0]);
@@ -130,8 +247,31 @@ export class PostgresPrototypeRepository implements PrototypeRepository {
     } catch (err: any) {
       console.warn('[PostgresPrototypeRepository] DB quota/error on createSession, using sovereign memory:', err.message);
     }
+
+    if (!projectId) {
+      const found = Array.from(fallbackProjects.values()).find(p => p.name === input.project);
+      if (found) {
+        projectId = found.id;
+      } else {
+        projectId = `proj-${id}`;
+        fallbackProjects.set(projectId, {
+          id: projectId,
+          workspaceId: DEFAULT_WORKSPACE_ID,
+          name: input.project,
+          description: '',
+          status: 'ACTIVE',
+          githubRepository: input.repository,
+          githubBranch: branch,
+          supabaseProjectReference: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      }
+    }
+
     const session: PrototypeSession = {
       id,
+      projectId,
       project: input.project,
       repository: input.repository,
       branch,
@@ -488,6 +628,420 @@ export class PostgresPrototypeRepository implements PrototypeRepository {
       console.warn('[PostgresPrototypeRepository] DB quota/error on listMessages:', err.message);
     }
     return fallbackMessages.get(sessionId) || [];
+  }
+
+  async listWorkspaces(userId?: string): Promise<Workspace[]> {
+    try {
+      const q = userId
+        ? `SELECT DISTINCT w.* FROM workspaces w JOIN workspace_members wm ON w.id = wm.workspace_id WHERE wm.user_id = $1 OR w.owner_id = $1 ORDER BY w.created_at ASC`
+        : `SELECT * FROM workspaces ORDER BY created_at ASC`;
+      const params = userId ? [userId] : [];
+      const r = await this.pool.query(q, params);
+      if (r?.rows) {
+        const list = r.rows.map(mapWorkspace);
+        for (const w of list) fallbackWorkspaces.set(w.id, w);
+        return list;
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] listWorkspaces error:', err.message);
+    }
+    return Array.from(fallbackWorkspaces.values());
+  }
+
+  async createWorkspace(input: { name: string; slug?: string; ownerId?: string }): Promise<Workspace> {
+    const id = randomUUID();
+    const slug = input.slug || input.name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || `ws-${Date.now()}`;
+    const ownerId = input.ownerId || DEFAULT_USER_ID;
+    try {
+      const r = await this.pool.query(
+        `INSERT INTO workspaces (id, name, slug, owner_id) VALUES ($1, $2, $3, $4) RETURNING *`,
+        [id, input.name, slug, ownerId]
+      );
+      if (r?.rows?.[0]) {
+        await this.pool.query(
+          `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'OWNER') ON CONFLICT DO NOTHING`,
+          [id, ownerId]
+        );
+        const ws = mapWorkspace(r.rows[0]);
+        fallbackWorkspaces.set(ws.id, ws);
+        return ws;
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] createWorkspace error:', err.message);
+    }
+    const ws: Workspace = {
+      id,
+      name: input.name,
+      slug,
+      ownerId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    fallbackWorkspaces.set(id, ws);
+    return ws;
+  }
+
+  async getWorkspace(id: string): Promise<Workspace | null> {
+    try {
+      const r = await this.pool.query(`SELECT * FROM workspaces WHERE id = $1`, [id]);
+      if (r?.rows?.[0]) {
+        const ws = mapWorkspace(r.rows[0]);
+        fallbackWorkspaces.set(ws.id, ws);
+        return ws;
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] getWorkspace error:', err.message);
+    }
+    return fallbackWorkspaces.get(id) || null;
+  }
+
+  async listProjects(workspaceId?: string): Promise<Project[]> {
+    try {
+      const q = workspaceId
+        ? `SELECT * FROM projects WHERE workspace_id = $1 ORDER BY updated_at DESC`
+        : `SELECT * FROM projects ORDER BY updated_at DESC`;
+      const params = workspaceId ? [workspaceId] : [];
+      const r = await this.pool.query(q, params);
+      if (r?.rows) {
+        const list = r.rows.map(mapProject);
+        for (const p of list) fallbackProjects.set(p.id, p);
+        return list;
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] listProjects error:', err.message);
+    }
+    let list = Array.from(fallbackProjects.values());
+    if (workspaceId) {
+      list = list.filter(p => p.workspaceId === workspaceId);
+    }
+    return list.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  }
+
+  async createProject(input: { workspaceId?: string; name: string; description?: string; githubRepository?: string; githubBranch?: string }): Promise<Project> {
+    const id = randomUUID();
+    const wsId = input.workspaceId || DEFAULT_WORKSPACE_ID;
+    try {
+      const r = await this.pool.query(
+        `INSERT INTO projects (id, workspace_id, name, description, github_repository, github_branch) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+        [id, wsId, input.name, input.description || '', input.githubRepository || null, input.githubBranch || null]
+      );
+      if (r?.rows?.[0]) {
+        const p = mapProject(r.rows[0]);
+        fallbackProjects.set(p.id, p);
+        return p;
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] createProject error:', err.message);
+    }
+    const p: Project = {
+      id,
+      workspaceId: wsId,
+      name: input.name,
+      description: input.description || '',
+      status: 'ACTIVE',
+      githubRepository: input.githubRepository || null,
+      githubBranch: input.githubBranch || null,
+      supabaseProjectReference: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    fallbackProjects.set(id, p);
+    return p;
+  }
+
+  async getProject(id: string): Promise<Project | null> {
+    try {
+      const r = await this.pool.query(`SELECT * FROM projects WHERE id = $1`, [id]);
+      if (r?.rows?.[0]) {
+        const p = mapProject(r.rows[0]);
+        fallbackProjects.set(p.id, p);
+        return p;
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] getProject error:', err.message);
+    }
+    return fallbackProjects.get(id) || null;
+  }
+
+  async updateProject(id: string, patch: Partial<Pick<Project, 'name' | 'description' | 'status' | 'githubRepository' | 'githubBranch'>>): Promise<Project | null> {
+    try {
+      const fields: Record<string, string> = {
+        name: 'name',
+        description: 'description',
+        status: 'status',
+        githubRepository: 'github_repository',
+        githubBranch: 'github_branch',
+      };
+      const values: unknown[] = [];
+      const set: string[] = [];
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === undefined) continue;
+        set.push(`${fields[key]}=$${values.length + 1}`);
+        values.push(value);
+      }
+      if (set.length > 0) {
+        values.push(id);
+        const r = await this.pool.query(
+          `UPDATE projects SET ${set.join(',')}, updated_at=now() WHERE id=$${values.length} RETURNING *`,
+          values
+        );
+        if (r?.rows?.[0]) {
+          const p = mapProject(r.rows[0]);
+          fallbackProjects.set(p.id, p);
+          return p;
+        }
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] updateProject error:', err.message);
+    }
+    const current = fallbackProjects.get(id);
+    if (!current) return null;
+    const updated: Project = { ...current, ...patch, updatedAt: new Date() };
+    fallbackProjects.set(id, updated);
+    return updated;
+  }
+
+  async deleteProject(id: string): Promise<boolean> {
+    try {
+      const r = await this.pool.query(`DELETE FROM projects WHERE id = $1 RETURNING id`, [id]);
+      const deleted = (r?.rowCount ?? 0) > 0;
+      fallbackProjects.delete(id);
+      for (const [sid, session] of fallbackSessions.entries()) {
+        if (session.projectId === id) {
+          fallbackSessions.delete(sid);
+          fallbackCheckpoints.delete(sid);
+          fallbackMessages.delete(sid);
+          fallbackCheckpointFiles.delete(sid);
+        }
+      }
+      return deleted;
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] deleteProject error:', err.message);
+      const existed = fallbackProjects.has(id);
+      fallbackProjects.delete(id);
+      for (const [sid, session] of fallbackSessions.entries()) {
+        if (session.projectId === id) {
+          fallbackSessions.delete(sid);
+          fallbackCheckpoints.delete(sid);
+          fallbackMessages.delete(sid);
+          fallbackCheckpointFiles.delete(sid);
+        }
+      }
+      return existed;
+    }
+  }
+
+  async saveCheckpointFiles(files: CheckpointFile[]): Promise<void> {
+    if (!files || files.length === 0) return;
+    try {
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        for (const f of files) {
+          await client.query(
+            `INSERT INTO prototype_checkpoint_files (id, checkpoint_id, session_id, path, content, content_type, size_bytes)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (checkpoint_id, path) DO UPDATE SET
+               content = EXCLUDED.content,
+               content_type = EXCLUDED.content_type,
+               size_bytes = EXCLUDED.size_bytes,
+               created_at = now()`,
+            [f.id || randomUUID(), f.checkpointId, f.sessionId, f.path, f.content, f.contentType || 'text/plain', f.sizeBytes || Buffer.byteLength(f.content, 'utf8')]
+          );
+        }
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] saveCheckpointFiles error:', err.message);
+    }
+    for (const f of files) {
+      const list = fallbackCheckpointFiles.get(f.sessionId) || [];
+      const filtered = list.filter(item => !(item.checkpointId === f.checkpointId && item.path === f.path));
+      filtered.push({
+        ...f,
+        id: f.id || randomUUID(),
+        contentType: f.contentType || 'text/plain',
+        sizeBytes: f.sizeBytes || Buffer.byteLength(f.content, 'utf8'),
+        createdAt: f.createdAt || new Date(),
+      });
+      fallbackCheckpointFiles.set(f.sessionId, filtered);
+    }
+  }
+
+  async listCheckpointFiles(checkpointId: string): Promise<CheckpointFile[]> {
+    try {
+      const r = await this.pool.query(
+        `SELECT * FROM prototype_checkpoint_files WHERE checkpoint_id = $1 ORDER BY path ASC`,
+        [checkpointId]
+      );
+      if (r?.rows) {
+        return r.rows.map(mapCheckpointFile);
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] listCheckpointFiles error:', err.message);
+    }
+    for (const files of fallbackCheckpointFiles.values()) {
+      const matches = files.filter(f => f.checkpointId === checkpointId);
+      if (matches.length > 0) return matches.sort((a, b) => a.path.localeCompare(b.path));
+    }
+    return [];
+  }
+
+  async getCheckpointFile(checkpointId: string, path: string): Promise<CheckpointFile | null> {
+    try {
+      const r = await this.pool.query(
+        `SELECT * FROM prototype_checkpoint_files WHERE checkpoint_id = $1 AND path = $2 LIMIT 1`,
+        [checkpointId, path]
+      );
+      if (r?.rows?.[0]) {
+        return mapCheckpointFile(r.rows[0]);
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] getCheckpointFile error:', err.message);
+    }
+    for (const files of fallbackCheckpointFiles.values()) {
+      const match = files.find(f => f.checkpointId === checkpointId && f.path === path);
+      if (match) return match;
+    }
+    return null;
+  }
+
+  async listSessionFiles(sessionId: string): Promise<CheckpointFile[]> {
+    try {
+      const r = await this.pool.query(
+        `SELECT DISTINCT ON (path) * FROM prototype_checkpoint_files WHERE session_id = $1 ORDER BY path, created_at DESC`,
+        [sessionId]
+      );
+      if (r?.rows) {
+        return r.rows.map(mapCheckpointFile);
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] listSessionFiles error:', err.message);
+    }
+    const files = fallbackCheckpointFiles.get(sessionId) || [];
+    const latestByPath = new Map<string, CheckpointFile>();
+    for (const f of files) {
+      latestByPath.set(f.path, f);
+    }
+    return Array.from(latestByPath.values()).sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  async getLatestSessionFile(sessionId: string, filePath: string): Promise<CheckpointFile | null> {
+    try {
+      const cleanPath = filePath.replace(/^\/+/, '');
+      const r = await this.pool.query(
+        `SELECT * FROM prototype_checkpoint_files WHERE session_id = $1 AND (path = $2 OR path = $3) ORDER BY created_at DESC LIMIT 1`,
+        [sessionId, cleanPath, `/${cleanPath}`]
+      );
+      if (r?.rows?.[0]) {
+        return mapCheckpointFile(r.rows[0]);
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] getLatestSessionFile error:', err.message);
+    }
+    const files = fallbackCheckpointFiles.get(sessionId) || [];
+    const cleanPath = filePath.replace(/^\/+/, '');
+    const matching = files
+      .filter(f => f.path === cleanPath || f.path === `/${cleanPath}`)
+      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+    return matching[0] || null;
+  }
+
+  async initializeSchema(): Promise<void> {
+    try {
+      await this.pool.query(`
+        CREATE TABLE IF NOT EXISTS users (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          email TEXT NOT NULL UNIQUE,
+          name TEXT,
+          avatar_url TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        CREATE TABLE IF NOT EXISTS workspaces (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          name TEXT NOT NULL,
+          slug TEXT NOT NULL UNIQUE,
+          owner_id UUID REFERENCES users(id) ON DELETE CASCADE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        CREATE TABLE IF NOT EXISTS workspace_members (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+          user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          role TEXT NOT NULL DEFAULT 'MEMBER' CHECK (role IN ('OWNER','ADMIN','MEMBER','VIEWER')),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          UNIQUE(workspace_id, user_id)
+        );
+        CREATE TABLE IF NOT EXISTS projects (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          description TEXT DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','ARCHIVED','BUILDING')),
+          github_repository TEXT,
+          github_branch TEXT,
+          supabase_project_reference TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        ALTER TABLE prototype_sessions ADD COLUMN IF NOT EXISTS project_id UUID REFERENCES projects(id) ON DELETE CASCADE;
+        CREATE TABLE IF NOT EXISTS prototype_checkpoint_files (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          checkpoint_id UUID NOT NULL REFERENCES prototype_checkpoints(id) ON DELETE CASCADE,
+          session_id UUID NOT NULL REFERENCES prototype_sessions(id) ON DELETE CASCADE,
+          path TEXT NOT NULL,
+          content TEXT NOT NULL,
+          content_type TEXT NOT NULL DEFAULT 'text/plain',
+          size_bytes INTEGER NOT NULL DEFAULT 0,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          UNIQUE(checkpoint_id, path)
+        );
+        DO $$
+        DECLARE
+          v_default_user_id UUID := '00000000-0000-0000-0000-000000000000';
+          v_default_workspace_id UUID := '11111111-1111-1111-1111-111111111111';
+        BEGIN
+          INSERT INTO users (id, email, name)
+          VALUES (v_default_user_id, 'default@pubprototype.internal', 'Default User')
+          ON CONFLICT (id) DO NOTHING;
+
+          INSERT INTO workspaces (id, name, slug, owner_id)
+          VALUES (v_default_workspace_id, 'Default Workspace', 'default-workspace', v_default_user_id)
+          ON CONFLICT (id) DO NOTHING;
+
+          INSERT INTO workspace_members (workspace_id, user_id, role)
+          VALUES (v_default_workspace_id, v_default_user_id, 'OWNER')
+          ON CONFLICT (workspace_id, user_id) DO NOTHING;
+
+          INSERT INTO projects (id, workspace_id, name, github_repository, github_branch)
+          SELECT 
+            gen_random_uuid(),
+            v_default_workspace_id,
+            s.project,
+            MAX(s.repository),
+            MAX(s.branch)
+          FROM prototype_sessions s
+          WHERE s.project_id IS NULL AND s.project IS NOT NULL
+          GROUP BY s.project
+          ON CONFLICT DO NOTHING;
+
+          UPDATE prototype_sessions s
+          SET project_id = p.id
+          FROM projects p
+          WHERE s.project_id IS NULL AND s.project = p.name AND p.workspace_id = v_default_workspace_id;
+        END $$;
+      `);
+      console.log('[PostgresPrototypeRepository] Schema initialized successfully');
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] Schema initialization notice:', err.message);
+    }
   }
 }
 

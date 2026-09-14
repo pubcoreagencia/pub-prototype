@@ -43,8 +43,63 @@ export const PROTOTYPE_EVENT_TYPES = [
 ] as const;
 export type PrototypeEventType = typeof PROTOTYPE_EVENT_TYPES[number];
 
+export type WorkspaceRole = 'OWNER' | 'ADMIN' | 'MEMBER' | 'VIEWER';
+
+export interface User {
+  id: string;
+  email: string;
+  name: string | null;
+  avatarUrl: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface Workspace {
+  id: string;
+  name: string;
+  slug: string;
+  ownerId: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface WorkspaceMember {
+  id: string;
+  workspaceId: string;
+  userId: string;
+  role: WorkspaceRole;
+  createdAt: Date;
+}
+
+export type ProjectStatus = 'ACTIVE' | 'ARCHIVED' | 'BUILDING';
+
+export interface Project {
+  id: string;
+  workspaceId: string;
+  name: string;
+  description: string;
+  status: ProjectStatus;
+  githubRepository: string | null;
+  githubBranch: string | null;
+  supabaseProjectReference: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface CheckpointFile {
+  id?: string;
+  checkpointId: string;
+  sessionId: string;
+  path: string;
+  content: string;
+  contentType: string;
+  sizeBytes: number;
+  createdAt?: Date;
+}
+
 export interface PrototypeSession {
   id: string;
+  projectId?: string | null;
   project: string;
   repository: string;
   branch: string;
@@ -59,7 +114,12 @@ export interface PrototypeSession {
   updatedAt: Date;
 }
 
-export interface CreatePrototypeSession { project: string; repository: string; branch?: string; }
+export interface CreatePrototypeSession {
+  projectId?: string;
+  project: string;
+  repository: string;
+  branch?: string;
+}
 export interface PrototypeCheckpoint { id:string; sessionId:string; promptIndex:number; prompt:string; commitSha:string|null; previewUrl:string|null; buildPassed:boolean; createdAt:Date; }
 export interface PrototypeEvent<TPayload extends Record<string, unknown> = Record<string, unknown>> { id:string; sessionId:string; type:PrototypeEventType; sequence:number; timestamp:Date; payload:TPayload; }
 export interface PrototypePromotion { id?: string; sessionId:string; fromMode:Extract<PrototypeMode,'PROTOTYPE'>; toMode:Extract<PrototypeMode,'DEVELOPMENT'>; repository:string; branch:string; checkpointSha:string|null; promotedAt:Date; }

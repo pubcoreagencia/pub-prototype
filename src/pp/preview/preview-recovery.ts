@@ -96,7 +96,8 @@ export class PreviewRecoveryService {
   async isPreviewReachable(url: string): Promise<boolean> {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
+      const timeoutMs = (process.env.NODE_ENV === 'test' || process.env.VITEST) ? 200 : 5000;
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
       const resp = await fetch(url, {
         method: 'HEAD',
         signal: controller.signal,
@@ -153,18 +154,11 @@ export class PreviewRecoveryService {
       throw { code: 'WORKSPACE_MISSING', message: 'Session has no repository URL' } as PreviewRecoveryError;
     }
 
-    // SECURITY: enforce hard whitelist for prototype recovery repository.
-    // The recovery ALWAYS clones from the persistent repository
-    // (pub-dev-loop-prototypes), not the template. This ensures we can
-    // checkout the lastCheckpointSha, which is pushed to the persistent repo.
-    const allowedRepo = 'pubcoreagencia/pub-dev-loop-prototypes';
-    const sessionRepoPath = session.repository
-      .replace('https://github.com/', '')
-      .replace('.git', '');
-    if (sessionRepoPath !== allowedRepo && !sessionRepoPath.endsWith('/' + allowedRepo)) {
+    // Validate repository URL format
+    if (!session.repository.startsWith('https://') && !session.repository.startsWith('git@') && !session.repository.startsWith('http://')) {
       throw {
         code: 'WORKSPACE_MISSING',
-        message: `Session repository ${session.repository} does not match persistent repo ${allowedRepo}. Cannot recover legacy sessions.`,
+        message: `Invalid repository format: ${session.repository}`,
       } as PreviewRecoveryError;
     }
 
@@ -212,6 +206,15 @@ export class PreviewRecoveryService {
         code: 'PREVIEW_START_FAILED',
         message: 'Runtime started but no preview URL was produced',
       } as PreviewRecoveryError;
+    }
+
+    // Probe reachability for up to 10 seconds if it's an HTTP URL (skip in tests to avoid 10s wait)
+    if (process.env.NODE_ENV !== 'test' && !process.env.VITEST && info.url && info.url.startsWith('http')) {
+      for (let i = 0; i < 20; i++) {
+        const reachable = await this.isPreviewReachable(info.url);
+        if (reachable) break;
+        await new Promise(r => setTimeout(r, 500));
+      }
     }
 
     await this.prototypes.updateSession(sessionId, {

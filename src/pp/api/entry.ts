@@ -18,6 +18,8 @@ import { LocalPreviewRuntime } from '../preview/local-preview-runtime.js';
 import { PublicPreviewRuntime } from '../preview/public-preview-runtime.js';
 import { PrototypeHandoffService, type PrototypeHandoffInput, type PdlTaskIngestionPort } from '../handoff/handoff.js';
 import { HttpPdlTaskIngestionPort, FailClosedPdlTaskIngestionPort } from '../handoff/http-client.js';
+import { PreviewRecoveryService } from '../preview/preview-recovery.js';
+import { AuthService } from '../auth/auth.js';
 
 export const createPpApp = (
   pool?: Pool,
@@ -28,6 +30,11 @@ export const createPpApp = (
   const activePool = pool ?? new Pool({ connectionString: process.env.DATABASE_URL });
   const taskRepo = tasks ?? new PostgresPpTaskRepository(activePool);
   const protoRepo = prototypes ?? new PostgresPrototypeRepository(activePool);
+  const authService = new AuthService(protoRepo);
+  const previewRecovery = new PreviewRecoveryService(protoRepo);
+  if (typeof protoRepo.initializeSchema === 'function') {
+    void protoRepo.initializeSchema().catch(err => console.warn('[PP API] Auto schema init notice:', err.message));
+  }
 
   const prototypeEvents = new PrototypeEventStream();
   const prototypeEventBridge = new PostgresPrototypeEventBridge(activePool, prototypeEvents);
@@ -136,9 +143,10 @@ export const createPpApp = (
   // POST /prototype/sessions
   app.post('/prototype/sessions', sessionRateLimiter, async (req, res, next) => {
     try {
-      const { project, repository, branch } = req.body ?? {};
+      const { project, repository, branch, projectId } = req.body ?? {};
       if (!project) return res.status(400).json({ error: 'project is required' });
       const session = await protoRepo.createSession({
+        projectId,
         project,
         repository: repository || defaultPrototypeRepository,
         branch,
@@ -169,6 +177,306 @@ export const createPpApp = (
     } catch (e) {
       return next(e);
     }
+  });
+
+  // Native Preview Serving: GET /prototype/sessions/:id/preview and /prototype/sessions/:id/preview/*
+  const handlePreviewRequest = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    try {
+      const sessionId = String(req.params.id);
+      const session = await protoRepo.getSession(sessionId);
+      if (!session) {
+        return res.status(404).send('Session not found');
+      }
+
+      let rawPath = (req.params as any).path ?? (req.params as any)[0];
+      let reqPath = Array.isArray(rawPath) ? rawPath.join('/') : String(rawPath || 'index.html');
+      if (!reqPath || reqPath === '/' || reqPath.trim() === '') {
+        reqPath = 'index.html';
+      }
+      reqPath = reqPath.replace(/^\/+/, '');
+
+      // 1. Try to serve from immutable checkpoint files stored in Postgres
+      const checkpointFile = await protoRepo.getLatestSessionFile(sessionId, reqPath);
+      if (checkpointFile) {
+        res.setHeader('Content-Type', checkpointFile.contentType || 'text/html; charset=utf-8');
+        res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        return res.send(checkpointFile.content);
+      }
+
+      // 2. Fallback to local workspace files if workspace exists on disk
+      if (session.workspacePath) {
+        try {
+          const { readFile, stat } = await import('node:fs/promises');
+          const localFilePath = path.join(session.workspacePath, reqPath);
+          const st = await stat(localFilePath);
+          if (st.isFile()) {
+            const content = await readFile(localFilePath);
+            const ext = path.extname(reqPath).toLowerCase();
+            let contentType = 'text/plain; charset=utf-8';
+            if (ext === '.html' || ext === '.htm') contentType = 'text/html; charset=utf-8';
+            else if (ext === '.css') contentType = 'text/css; charset=utf-8';
+            else if (ext === '.js') contentType = 'application/javascript; charset=utf-8';
+            else if (ext === '.json') contentType = 'application/json; charset=utf-8';
+            else if (ext === '.svg') contentType = 'image/svg+xml';
+            res.setHeader('Content-Type', contentType);
+            res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+            return res.send(content);
+          }
+        } catch {
+          // Fall through to fallback
+        }
+      }
+
+      // 3. Aesthetic HTML placeholder if index.html is requested before first build
+      if (reqPath === 'index.html') {
+        return res.status(200).type('html').send(`
+          <!doctype html>
+          <html>
+            <head>
+              <meta charset="utf-8">
+              <title>${session.project} — Preview</title>
+              <style>
+                body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0e0f12; color: #a1a1aa; display: grid; place-items: center; height: 100vh; margin: 0; }
+                .card { text-align: center; max-width: 420px; padding: 32px; background: #18191f; border-radius: 12px; border: 1px solid #27272a; }
+                h2 { color: #fafafa; font-size: 18px; margin-top: 0; }
+                p { font-size: 14px; line-height: 1.5; }
+                .status { display: inline-block; padding: 4px 10px; border-radius: 6px; font-size: 12px; background: #27272a; color: #38bdf8; font-weight: 600; margin-bottom: 12px; }
+              </style>
+            </head>
+            <body>
+              <div class="card">
+                <div class="status">${session.status}</div>
+                <h2>${session.project}</h2>
+                <p>O protótipo está sendo preparado ou aguarda a conclusão da tarefa de compilação.</p>
+              </div>
+            </body>
+          </html>
+        `);
+      }
+
+      return res.status(404).send(`File ${reqPath} not found in session preview`);
+    } catch (e) {
+      return next(e);
+    }
+  };
+
+  app.get(['/prototype/sessions/:id/preview', '/prototype/sessions/:id/preview/{*path}'], handlePreviewRequest);
+
+  // POST /prototype/sessions/:id/preview/refresh & /restart
+  app.post(['/prototype/sessions/:id/preview/refresh', '/prototype/sessions/:id/preview/restart'], async (req, res, next) => {
+    try {
+      const sessionId = String(req.params.id);
+      const session = await protoRepo.getSession(sessionId);
+      if (!session) return res.status(404).json({ error: 'Session not found' });
+
+      // First check if checkpoint files exist for native preview
+      const files = await protoRepo.listSessionFiles(sessionId);
+      if (files.length > 0) {
+        const nativeUrl = `/prototype/sessions/${sessionId}/preview/`;
+        await protoRepo.updateSession(sessionId, { previewUrl: nativeUrl, status: 'READY' });
+        prototypeEvents.emit({
+          sessionId,
+          type: 'PREVIEW_READY',
+          payload: { sessionId, url: nativeUrl, mode: 'native' }
+        });
+        return res.json({
+          ok: true,
+          previewUrl: nativeUrl,
+          mode: 'native',
+          filesCount: files.length,
+        });
+      }
+
+      // Otherwise attempt runtime recovery
+      try {
+        const result = await previewRecovery.refresh(sessionId);
+        prototypeEvents.emit({
+          sessionId,
+          type: 'PREVIEW_READY',
+          payload: { sessionId, url: result.previewUrl, runtimeId: result.previewRuntime }
+        });
+        return res.json({ ok: true, previewUrl: result.previewUrl, previewRuntime: result.previewRuntime });
+      } catch (recErr: any) {
+        console.warn('[PP API] Preview recovery warning:', recErr.message);
+        const nativeUrl = `/prototype/sessions/${sessionId}/preview/`;
+        return res.json({ ok: true, previewUrl: nativeUrl, fallback: true });
+      }
+    } catch (e) {
+      return next(e);
+    }
+  });
+
+  // GET /prototype/sessions/:id/files (List files for inspector)
+  app.get('/prototype/sessions/:id/files', async (req, res, next) => {
+    try {
+      const sessionId = String(req.params.id);
+      const session = await protoRepo.getSession(sessionId);
+      if (!session) return res.status(404).json({ error: 'Session not found' });
+
+      const files = await protoRepo.listSessionFiles(sessionId);
+      return res.json({
+        sessionId,
+        files: files.map(f => ({
+          path: f.path,
+          contentType: f.contentType,
+          sizeBytes: f.sizeBytes,
+          checkpointId: f.checkpointId,
+          createdAt: f.createdAt,
+        }))
+      });
+    } catch (e) {
+      return next(e);
+    }
+  });
+
+  // GET /prototype/sessions/:id/files/* (Inspect single file content)
+  app.get('/prototype/sessions/:id/files/{*path}', async (req, res, next) => {
+    try {
+      const sessionId = String(req.params.id);
+      const rawPath = (req.params as any).path ?? (req.params as any)[0];
+      const filePath = Array.isArray(rawPath) ? rawPath.join('/') : String(rawPath || '');
+      if (!filePath) return res.status(400).json({ error: 'File path required' });
+
+      const file = await protoRepo.getLatestSessionFile(sessionId, filePath);
+      if (!file) return res.status(404).json({ error: `File ${filePath} not found` });
+
+      return res.json({
+        path: file.path,
+        content: file.content,
+        contentType: file.contentType,
+        sizeBytes: file.sizeBytes,
+        checkpointId: file.checkpointId,
+      });
+    } catch (e) {
+      return next(e);
+    }
+  });
+
+  // Workspaces API
+  app.get('/api/workspaces', async (req, res, next) => {
+    try {
+      const user = await authService.verifyToken(req.headers.authorization);
+      const workspaces = await protoRepo.listWorkspaces(user?.id);
+      return res.json(workspaces);
+    } catch (e) {
+      return next(e);
+    }
+  });
+
+  app.post('/api/workspaces', authService.requireAuth(), async (req, res, next) => {
+    try {
+      const { name, slug } = req.body ?? {};
+      if (!name) return res.status(400).json({ error: 'name is required' });
+      const ws = await protoRepo.createWorkspace({
+        name,
+        slug,
+        ownerId: req.user?.id,
+      });
+      return res.status(201).json(ws);
+    } catch (e) {
+      return next(e);
+    }
+  });
+
+  // Projects API
+  app.get('/api/projects', async (req, res, next) => {
+    try {
+      const workspaceId = (req.query.workspaceId as string) || undefined;
+      const projects = await protoRepo.listProjects(workspaceId);
+      return res.json(projects);
+    } catch (e) {
+      return next(e);
+    }
+  });
+
+  app.get('/api/workspaces/:workspaceId/projects', async (req, res, next) => {
+    try {
+      const workspaceId = String(req.params.workspaceId);
+      const projects = await protoRepo.listProjects(workspaceId);
+      return res.json(projects);
+    } catch (e) {
+      return next(e);
+    }
+  });
+
+  app.post('/api/workspaces/:workspaceId/projects', async (req, res, next) => {
+    try {
+      const workspaceId = String(req.params.workspaceId);
+      const { name, description, githubRepository, githubBranch } = req.body ?? {};
+      if (!name) return res.status(400).json({ error: 'name is required' });
+      const project = await protoRepo.createProject({
+        workspaceId,
+        name,
+        description,
+        githubRepository,
+        githubBranch,
+      });
+      return res.status(201).json(project);
+    } catch (e) {
+      return next(e);
+    }
+  });
+
+  app.get('/api/projects/:id', async (req, res, next) => {
+    try {
+      const projectId = String(req.params.id);
+      const project = await protoRepo.getProject(projectId);
+      if (!project) return res.status(404).json({ error: 'Project not found' });
+      const allSessions = await protoRepo.listSessions();
+      const projectSessions = allSessions.filter(s => s.projectId === project.id || s.project === project.name);
+      return res.json({ ...project, sessions: projectSessions });
+    } catch (e) {
+      return next(e);
+    }
+  });
+
+  app.patch('/api/projects/:id', async (req, res, next) => {
+    try {
+      const projectId = String(req.params.id);
+      const { name, description, status, githubRepository, githubBranch } = req.body ?? {};
+      const updated = await protoRepo.updateProject(projectId, {
+        name,
+        description,
+        status,
+        githubRepository,
+        githubBranch,
+      });
+      if (!updated) return res.status(404).json({ error: 'Project not found' });
+      return res.json(updated);
+    } catch (e) {
+      return next(e);
+    }
+  });
+
+  app.delete('/api/projects/:id', async (req, res, next) => {
+    try {
+      const projectId = String(req.params.id);
+      const project = await protoRepo.getProject(projectId);
+      if (!project) return res.status(404).json({ error: 'Project not found' });
+      // Delete project - relational CASCADE deletes associated sessions, tasks, checkpoints, files
+      // Explicitly: remote GitHub repository is NEVER touched.
+      const ok = await protoRepo.deleteProject(projectId);
+      return res.json({ ok, deletedId: projectId });
+    } catch (e) {
+      return next(e);
+    }
+  });
+
+  // Auth API
+  app.get('/api/auth/me', async (req, res) => {
+    const user = await authService.verifyToken(req.headers.authorization);
+    return res.json({ user, supabaseConfigured: authService.isSupabaseConfigured() });
+  });
+
+  app.post('/api/auth/login', async (req, res) => {
+    const email = req.body?.email || 'default@pubprototype.internal';
+    const user = await authService.verifyToken(req.body?.token || 'test-token');
+    return res.json({ token: 'test-token', user: { ...user, email } });
+  });
+
+  app.post('/api/auth/logout', async (_req, res) => {
+    return res.json({ ok: true });
   });
 
   // GET /prototype/sessions/:id/events (SSE)

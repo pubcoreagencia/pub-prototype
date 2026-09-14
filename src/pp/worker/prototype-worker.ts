@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { access, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { PrototypeTask, PpTaskRepository } from '../domain/domain.js';
+import type { PrototypeTask, PpTaskRepository, CheckpointFile } from '../domain/domain.js';
 import { TaskFinalizer, captureWorkspaceSnapshot } from '../../finalizer.js';
 import type { AgentProvider, ProviderTaskInput, ProviderTaskResult } from '../../providers/types.js';
 import { PREVIEW_SYSTEM_INSTRUCTIONS } from './prompts.js';
@@ -15,6 +15,88 @@ import { StreamEventSink } from '../../providers/streaming/index.js';
 import { OperationalEventBridge } from '../events/bridge.js';
 import { loadOpenRouterConfig } from '../../providers/openrouterConfig.js';
 import { CorrectionController } from './correction-controller.js';
+
+const IGNORED_DIRS = new Set(['.git', 'node_modules', '.next', '.cache', 'dist', 'build']);
+
+function getContentTypeForFile(filename: string): string {
+  const ext = path.extname(filename).toLowerCase();
+  switch (ext) {
+    case '.html':
+    case '.htm':
+      return 'text/html; charset=utf-8';
+    case '.css':
+      return 'text/css; charset=utf-8';
+    case '.js':
+    case '.mjs':
+    case '.cjs':
+      return 'application/javascript; charset=utf-8';
+    case '.ts':
+    case '.tsx':
+      return 'application/typescript; charset=utf-8';
+    case '.json':
+      return 'application/json; charset=utf-8';
+    case '.svg':
+      return 'image/svg+xml';
+    case '.png':
+      return 'image/png';
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.ico':
+      return 'image/x-icon';
+    case '.md':
+      return 'text/markdown; charset=utf-8';
+    default:
+      return 'text/plain; charset=utf-8';
+  }
+}
+
+async function extractWorkspaceFiles(
+  workspaceDir: string,
+  checkpointId: string,
+  sessionId: string
+): Promise<CheckpointFile[]> {
+  const { readdir, readFile, stat } = await import('node:fs/promises');
+  const results: CheckpointFile[] = [];
+
+  async function walk(currentDir: string) {
+    let entries: string[] = [];
+    try {
+      entries = await readdir(currentDir);
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (IGNORED_DIRS.has(entry) || entry.startsWith('.')) continue;
+      const fullPath = path.join(currentDir, entry);
+      try {
+        const fileStat = await stat(fullPath);
+        if (fileStat.isDirectory()) {
+          await walk(fullPath);
+        } else if (fileStat.isFile()) {
+          if (fileStat.size > 2 * 1024 * 1024) continue; // Skip files > 2MB
+          const relPath = path.relative(workspaceDir, fullPath).replace(/\\/g, '/');
+          const content = await readFile(fullPath, 'utf8');
+          results.push({
+            checkpointId,
+            sessionId,
+            path: relPath,
+            content,
+            contentType: getContentTypeForFile(relPath),
+            sizeBytes: fileStat.size,
+          });
+        }
+      } catch {
+        // Skip unreadable files
+      }
+    }
+  }
+
+  await walk(workspaceDir);
+  return results;
+}
+
 
 
 const LEASE_TIMEOUT_MS = Number(process.env.WORKER_LEASE_TIMEOUT_MS ?? 30000);
@@ -542,8 +624,16 @@ export class PrototypeWorker {
       // If changedFiles is empty on an iterative prompt (e.g. agent answered question or workspace was already updated),
       // we ensure the existing prototype files are served and preview is refreshed without failing the session.
       const preview = await this.ensurePreview(sessionId, workspace);
-      await this.prototypes.updateSession(sessionId, { status: 'READY', workspacePath: workspace, previewRuntime: preview.id,
-        previewUrl: preview.url, lastCheckpointSha: finalize.commitSha });
+      const nativePreviewUrl = `/prototype/sessions/${sessionId}/preview/`;
+      const resolvedPreviewUrl = preview.url || nativePreviewUrl;
+      const publicUrl = preview.url || null;
+      await this.prototypes.updateSession(sessionId, {
+        status: 'READY',
+        workspacePath: workspace,
+        previewRuntime: preview.id,
+        previewUrl: resolvedPreviewUrl,
+        lastCheckpointSha: finalize.commitSha,
+      });
 
       // Save assistant message to the chat history linked to the task_id
       try {
@@ -571,8 +661,26 @@ export class PrototypeWorker {
       }
 
       const session = await this.prototypes.getSession(sessionId);
-      const checkpoint = await this.prototypes.createCheckpoint({ sessionId, promptIndex: session?.promptCount ?? 1, prompt: task.prompt,
-        commitSha: finalize.commitSha, previewUrl: preview.url, buildPassed: true });
+      const checkpoint = await this.prototypes.createCheckpoint({
+        sessionId,
+        promptIndex: session?.promptCount ?? 1,
+        prompt: task.prompt,
+        commitSha: finalize.commitSha,
+        previewUrl: resolvedPreviewUrl,
+        buildPassed: true,
+      });
+
+      try {
+        if (typeof this.prototypes.saveCheckpointFiles === 'function') {
+          const files = await extractWorkspaceFiles(workspace, checkpoint.id, sessionId);
+          if (files.length > 0) {
+            await this.prototypes.saveCheckpointFiles(files);
+            console.log(`[Prototype Worker] Stored ${files.length} checkpoint files for session ${sessionId}, cp ${checkpoint.id}`);
+          }
+        }
+      } catch (fErr: any) {
+        console.warn('[Prototype Worker] Failed to extract checkpoint files:', fErr.message);
+      }
 
       console.log(JSON.stringify({
         event: 'CHECKPOINT_CREATED',
@@ -585,7 +693,17 @@ export class PrototypeWorker {
       await this.tasks.update(task.id, { status: 'COMPLETED' });
       task.status = 'COMPLETED'; // Update local object for finally block
       await this.events.emit({ sessionId, type: 'CHECKPOINT_CREATED', payload: checkpoint as unknown as Record<string, unknown> });
-      await this.events.emit({ sessionId, type: 'PREVIEW_READY', payload: { sessionId, url: preview.url, runtimeId: preview.id, port: preview.port } });
+      await this.events.emit({
+        sessionId,
+        type: 'PREVIEW_READY',
+        payload: {
+          sessionId,
+          url: resolvedPreviewUrl,
+          publicUrl,
+          runtimeId: preview.id,
+          port: preview.port,
+        },
+      });
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
