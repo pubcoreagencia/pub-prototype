@@ -65,6 +65,8 @@ export class OperationalEventBridge {
   } | null = null;
   private flushTimer: any = null;
 
+  private isClosed = false;
+
   constructor(
     private readonly sessionId: string,
     private readonly publisher: PrototypeEventPublisher,
@@ -72,7 +74,7 @@ export class OperationalEventBridge {
   ) {}
 
   async handleEnvelope(envelope: OperationalEventEnvelope): Promise<void> {
-    if (!envelope || !envelope.type) return;
+    if (this.isClosed || !envelope || !envelope.type) return;
 
     const dedupKey = `${this.sessionId}:${envelope.taskId}:${envelope.attempt}:${envelope.seq}:${envelope.type}`;
     if (this.processedIds.has(dedupKey)) {
@@ -183,6 +185,11 @@ export class OperationalEventBridge {
   }
 
   async close(): Promise<void> {
+    this.isClosed = true;
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
     await this.flushPendingDeltas();
   }
 }

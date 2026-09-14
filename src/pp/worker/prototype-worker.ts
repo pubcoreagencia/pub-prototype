@@ -235,16 +235,40 @@ export class PrototypeWorker {
 
       const timeoutMs = 120 * 1000;
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      let timer: NodeJS.Timeout | null = null;
+      let timedOut = false;
+
+      const timeoutPromise = new Promise<ProviderTaskResult>((resolve) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+          resolve({
+            status: 'TIMED_OUT',
+            provider: this.provider.kind || 'openrouter',
+            model: initialModel || (this.provider as any).model || 'default',
+            exitCode: null,
+            durationMs: timeoutMs,
+            stdout: '',
+            stderr: 'AI Provider execution timed out after 120 seconds',
+            changedFiles: [],
+            commit: null,
+            errorCode: 'EXECUTION_TIMEOUT',
+            errorMessage: 'AI Provider execution timed out after 120 seconds',
+          });
+        }, timeoutMs);
+      });
 
       let result: ProviderTaskResult;
       try {
-        result = await this.provider.execute(taskWithInstructions, workspace, {
-          consumer: sink,
-          signal: controller.signal,
-        });
+        result = await Promise.race([
+          this.provider.execute(taskWithInstructions, workspace, {
+            consumer: sink,
+            signal: controller.signal,
+          }),
+          timeoutPromise,
+        ]);
       } catch (e: any) {
-        if (controller.signal.aborted) {
+        if (controller.signal.aborted || timedOut) {
           result = {
             status: 'TIMED_OUT',
             provider: this.provider.kind || 'openrouter',
@@ -262,7 +286,23 @@ export class PrototypeWorker {
           throw e;
         }
       } finally {
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
+      }
+
+      if (controller.signal.aborted || timedOut) {
+        result = {
+          status: 'TIMED_OUT',
+          provider: this.provider.kind || 'openrouter',
+          model: initialModel || (this.provider as any).model || 'default',
+          exitCode: null,
+          durationMs: timeoutMs,
+          stdout: result?.stdout ?? '',
+          stderr: 'AI Provider execution timed out after 120 seconds',
+          changedFiles: [],
+          commit: null,
+          errorCode: 'EXECUTION_TIMEOUT',
+          errorMessage: 'AI Provider execution timed out after 120 seconds',
+        };
       }
 
       // If provider completed, emit attempt_completed before closing bridge
