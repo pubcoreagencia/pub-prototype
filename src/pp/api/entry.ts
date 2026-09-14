@@ -356,6 +356,13 @@ export const createPpApp = (
     }
   });
 
+  // 404 handler for nonexistent routes
+  app.use((req, res, next) => {
+    const err = new Error(`Not Found: ${req.method} ${req.originalUrl}`);
+    (err as any).status = 404;
+    next(err);
+  });
+
   // Global structured JSON error handler
   app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
     // If headers are already sent, delegate to default error handler
