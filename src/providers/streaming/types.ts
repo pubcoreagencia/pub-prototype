@@ -8,7 +8,8 @@ export type StreamEventType =
   | 'finish_reason'
   | 'usage'
   | 'error'
-  | 'stream_completed';
+  | 'stream_completed'
+  | 'reasoning_delta';
 
 export type OperationalEventType =
   | StreamEventType
@@ -68,4 +69,5 @@ export interface StreamConsumer {
   onUsage?: (usage: StreamUsageData) => void;
   onError?: (error: Error) => void;
   onEnvelope?: (envelope: OperationalEventEnvelope) => void;
+  onActivity?: () => void;
 }

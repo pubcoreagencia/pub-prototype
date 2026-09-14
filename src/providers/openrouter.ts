@@ -528,6 +528,7 @@ export class OpenRouterProvider implements AgentProvider {
                   };
                 }
                 totalToolCalls++;
+                effectiveConsumer?.onActivity?.();
                 let args: Record<string, unknown> = {};
                 try {
                   args = JSON.parse(tc.function.arguments);
@@ -535,7 +536,9 @@ export class OpenRouterProvider implements AgentProvider {
                   toolResults.push({ toolCallId: tc.id, toolName: tc.function.name, success: false, content: '', error: 'Failed to parse tool arguments as JSON' });
                   continue;
                 }
-                toolResults.push(await runtime.executeTool(tc.id, tc.function.name, args));
+                const toolRes = await runtime.executeTool(tc.id, tc.function.name, args);
+                effectiveConsumer?.onActivity?.();
+                toolResults.push(toolRes);
               }
 
               messages.push({ role: 'assistant', content: messageContent || null, tool_calls: toolCalls });

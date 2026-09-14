@@ -67,13 +67,23 @@ export class StreamEventSink implements StreamConsumer {
     return envelope;
   }
 
+  onActivity(): void {
+    try { this.externalConsumer?.onActivity?.(); } catch {}
+  }
+
   onEvent(event: StreamEvent): void {
     this.feedback.eventsCount++;
 
-    // 1. Generate and emit OperationalEventEnvelope
-    this.emitEnvelope(event.type, event);
+    // 1. Notify activity liveness
+    try { this.externalConsumer?.onActivity?.(); } catch {}
 
-    // 2. Specific event routing
+    // 2. Generate and emit OperationalEventEnvelope ONLY for non-reasoning events
+    // (Reasoning acts as internal liveness and is not flooded to the UI / WebSocket / Event Bridge)
+    if (event.type !== 'reasoning_delta') {
+      this.emitEnvelope(event.type, event);
+    }
+
+    // 3. Specific event routing
     if (event.type === 'text_delta' && event.text) {
       this.feedback.textBuffer += event.text;
       try { this.externalConsumer?.onTextDelta?.(event.text); } catch {}

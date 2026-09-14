@@ -76,6 +76,22 @@ export async function parseOpenAISSEStream(
 
               const delta = choice.delta;
               if (delta) {
+                // Reasoning delta: check delta.reasoning, delta.reasoning_content, delta.thought, delta.thinking, or delta.reasoning_details
+                const reasoning =
+                  (typeof delta.reasoning === 'string' && delta.reasoning.length > 0 ? delta.reasoning : undefined) ??
+                  (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0 ? delta.reasoning_content : undefined) ??
+                  (typeof delta.thought === 'string' && delta.thought.length > 0 ? delta.thought : undefined) ??
+                  (typeof delta.thinking === 'string' && delta.thinking.length > 0 ? delta.thinking : undefined);
+
+                if (reasoning) {
+                  onEvent?.({ type: 'reasoning_delta', text: reasoning });
+                } else if (Array.isArray(delta.reasoning_details) && delta.reasoning_details.length > 0) {
+                  const detailText = delta.reasoning_details.map((d: any) => d.text || '').join('');
+                  if (detailText) {
+                    onEvent?.({ type: 'reasoning_delta', text: detailText });
+                  }
+                }
+
                 // Text delta
                 if (delta.content) {
                   fullText += delta.content;

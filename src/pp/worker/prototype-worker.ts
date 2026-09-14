@@ -27,6 +27,21 @@ const PREVIEW_ARGS = (process.env.PROTOTYPE_PREVIEW_ARGS ?? 'run dev -- --host 0
 const PREVIEW_MODE = process.env.PROTOTYPE_PREVIEW_MODE ?? 'public';
 const RESTORE_OBJECTIVE = '__PP_RESTORE_CHECKPOINT__';
 
+const DEFAULT_IDLE_TIMEOUT_MS = 120 * 1000; // 120 seconds
+const DEFAULT_ABSOLUTE_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+
+const IDLE_TIMEOUT_MS = Number(
+  process.env.PROTOTYPE_IDLE_TIMEOUT_MS ??
+  process.env.PP_IDLE_TIMEOUT_MS ??
+  DEFAULT_IDLE_TIMEOUT_MS
+);
+
+const ABSOLUTE_TIMEOUT_MS = Number(
+  process.env.PROTOTYPE_ABSOLUTE_TIMEOUT_MS ??
+  process.env.PP_ABSOLUTE_TIMEOUT_MS ??
+  DEFAULT_ABSOLUTE_TIMEOUT_MS
+);
+
 function git(args: string[], cwd?: string): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
 }
@@ -46,10 +61,17 @@ function parseRestore(prompt: string): { commitSha: string; checkpointId: string
   return { commitSha: value.commitSha, checkpointId: value.checkpointId };
 }
 
+export interface PrototypeWorkerOptions {
+  idleTimeoutMs?: number;
+  absoluteTimeoutMs?: number;
+}
+
 export class PrototypeWorker {
   private state = 'IDLE';
   private readonly preview: PreviewRuntime;
   private readonly cleanupTimers = new Map<string, NodeJS.Timeout>();
+  private readonly idleTimeoutMs: number;
+  private readonly absoluteTimeoutMs: number;
 
   constructor(
     private readonly tasks: PpTaskRepository,
@@ -58,12 +80,15 @@ export class PrototypeWorker {
     private readonly events: PrototypeEventPublisher,
     private readonly name = 'prototype',
     previewRuntime?: PreviewRuntime,
+    options?: PrototypeWorkerOptions,
   ) {
     this.preview = previewRuntime ?? (
       (process.env.PROTOTYPE_PREVIEW_MODE ?? 'public') === 'local'
         ? new LocalPreviewRuntime()
         : new PublicPreviewRuntime()
     );
+    this.idleTimeoutMs = options?.idleTimeoutMs ?? IDLE_TIMEOUT_MS;
+    this.absoluteTimeoutMs = options?.absoluteTimeoutMs ?? ABSOLUTE_TIMEOUT_MS;
   }
 
   status(): string { return this.state; }
@@ -197,11 +222,76 @@ export class PrototypeWorker {
       const baseline = captureWorkspaceSnapshot(workspace);
       const started = Date.now();
 
+      const controller = new AbortController();
+      let idleTimer: NodeJS.Timeout | null = null;
+      let absoluteTimer: NodeJS.Timeout | null = null;
+      let executionFinished = false;
+      let timeoutReason: 'IDLE' | 'ABSOLUTE' | null = null;
+
+      let resolveTimeout!: (value: ProviderTaskResult) => void;
+      const timeoutPromise = new Promise<ProviderTaskResult>((resolve) => {
+        resolveTimeout = resolve;
+      });
+
+      const cleanupTimers = () => {
+        if (idleTimer) {
+          clearTimeout(idleTimer);
+          idleTimer = null;
+        }
+        if (absoluteTimer) {
+          clearTimeout(absoluteTimer);
+          absoluteTimer = null;
+        }
+      };
+
+      const handleTimeout = (reason: 'IDLE' | 'ABSOLUTE') => {
+        if (executionFinished) return;
+        executionFinished = true;
+        timeoutReason = reason;
+        cleanupTimers();
+        controller.abort();
+
+        const durationMs = Date.now() - started;
+        const errorMessage = reason === 'IDLE'
+          ? `AI Provider execution timed out: idle timeout exceeded (${Math.round(this.idleTimeoutMs / 1000)}s without activity)`
+          : `AI Provider execution timed out: absolute timeout exceeded (${Math.round(this.absoluteTimeoutMs / 1000)}s limit)`;
+
+        resolveTimeout({
+          status: 'TIMED_OUT',
+          provider: this.provider.kind || 'openrouter',
+          model: initialModel || (this.provider as any).model || 'default',
+          exitCode: null,
+          durationMs,
+          stdout: '',
+          stderr: errorMessage,
+          changedFiles: [],
+          commit: null,
+          errorCode: reason === 'IDLE' ? 'IDLE_TIMEOUT' : 'EXECUTION_TIMEOUT',
+          errorMessage,
+        });
+      };
+
+      const resetIdleTimer = () => {
+        if (executionFinished) return;
+        if (idleTimer) {
+          clearTimeout(idleTimer);
+        }
+        idleTimer = setTimeout(() => handleTimeout('IDLE'), this.idleTimeoutMs);
+      };
+
+      // Start two-tier timers
+      resetIdleTimer();
+      absoluteTimer = setTimeout(() => handleTimeout('ABSOLUTE'), this.absoluteTimeoutMs);
+
       const bridge = new OperationalEventBridge(sessionId, this.events);
       const sink = new StreamEventSink(
         {
           onEnvelope: (envelope) => {
+            resetIdleTimer();
             bridge.handleEnvelope(envelope).catch(() => undefined);
+          },
+          onActivity: () => {
+            resetIdleTimer();
           },
         },
         { taskId: task.id, attempt: 0 }
@@ -233,31 +323,6 @@ export class PrototypeWorker {
         model: initialModel || (this.provider as any).model || 'default',
       });
 
-      const timeoutMs = 120 * 1000;
-      const controller = new AbortController();
-      let timer: NodeJS.Timeout | null = null;
-      let timedOut = false;
-
-      const timeoutPromise = new Promise<ProviderTaskResult>((resolve) => {
-        timer = setTimeout(() => {
-          timedOut = true;
-          controller.abort();
-          resolve({
-            status: 'TIMED_OUT',
-            provider: this.provider.kind || 'openrouter',
-            model: initialModel || (this.provider as any).model || 'default',
-            exitCode: null,
-            durationMs: timeoutMs,
-            stdout: '',
-            stderr: 'AI Provider execution timed out after 120 seconds',
-            changedFiles: [],
-            commit: null,
-            errorCode: 'EXECUTION_TIMEOUT',
-            errorMessage: 'AI Provider execution timed out after 120 seconds',
-          });
-        }, timeoutMs);
-      });
-
       let result: ProviderTaskResult;
       try {
         result = await Promise.race([
@@ -267,41 +332,58 @@ export class PrototypeWorker {
           }),
           timeoutPromise,
         ]);
+        executionFinished = true;
+        cleanupTimers();
       } catch (e: any) {
-        if (controller.signal.aborted || timedOut) {
+        executionFinished = true;
+        cleanupTimers();
+        if (controller.signal.aborted || timeoutReason) {
+          const durationMs = Date.now() - started;
+          const errorMessage = timeoutReason === 'IDLE'
+            ? `AI Provider execution timed out: idle timeout exceeded (${Math.round(this.idleTimeoutMs / 1000)}s without activity)`
+            : timeoutReason === 'ABSOLUTE'
+              ? `AI Provider execution timed out: absolute timeout exceeded (${Math.round(this.absoluteTimeoutMs / 1000)}s limit)`
+              : 'AI Provider execution timed out';
           result = {
             status: 'TIMED_OUT',
             provider: this.provider.kind || 'openrouter',
             model: initialModel || (this.provider as any).model || 'default',
             exitCode: null,
-            durationMs: timeoutMs,
+            durationMs,
             stdout: '',
-            stderr: 'AI Provider execution timed out after 120 seconds',
+            stderr: errorMessage,
             changedFiles: [],
             commit: null,
-            errorCode: 'EXECUTION_TIMEOUT',
-            errorMessage: 'AI Provider execution timed out after 120 seconds',
+            errorCode: timeoutReason === 'IDLE' ? 'IDLE_TIMEOUT' : 'EXECUTION_TIMEOUT',
+            errorMessage,
           };
         } else {
           throw e;
         }
       } finally {
-        if (timer) clearTimeout(timer);
+        executionFinished = true;
+        cleanupTimers();
       }
 
-      if (controller.signal.aborted || timedOut) {
+      if (controller.signal.aborted || timeoutReason) {
+        const durationMs = Date.now() - started;
+        const errorMessage = timeoutReason === 'IDLE'
+          ? `AI Provider execution timed out: idle timeout exceeded (${Math.round(this.idleTimeoutMs / 1000)}s without activity)`
+          : timeoutReason === 'ABSOLUTE'
+            ? `AI Provider execution timed out: absolute timeout exceeded (${Math.round(this.absoluteTimeoutMs / 1000)}s limit)`
+            : (result?.errorMessage ?? 'AI Provider execution timed out');
         result = {
           status: 'TIMED_OUT',
           provider: this.provider.kind || 'openrouter',
           model: initialModel || (this.provider as any).model || 'default',
           exitCode: null,
-          durationMs: timeoutMs,
+          durationMs,
           stdout: result?.stdout ?? '',
-          stderr: 'AI Provider execution timed out after 120 seconds',
+          stderr: errorMessage,
           changedFiles: [],
           commit: null,
-          errorCode: 'EXECUTION_TIMEOUT',
-          errorMessage: 'AI Provider execution timed out after 120 seconds',
+          errorCode: timeoutReason === 'IDLE' ? 'IDLE_TIMEOUT' : 'EXECUTION_TIMEOUT',
+          errorMessage,
         };
       }
 
