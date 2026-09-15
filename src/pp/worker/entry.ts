@@ -8,7 +8,7 @@ import { PostgresPpTaskRepository } from '../persistence/task-repository.js';
 import { PostgresPrototypeRepository } from '../persistence/repository.js';
 import { PostgresPrototypeEventPublisher } from '../events/events.js';
 import { PrototypeWorker } from './prototype-worker.js';
-import { configureGitCredentials } from '../../worker.js';
+import { configureGitCredentials, configureGitIdentity } from '../../worker.js';
 
 const PORT = Number(process.env.PP_WORKER_PORT ?? process.env.PORT ?? 3002);
 const POLL_INTERVAL_MS = Number(process.env.PP_WORKER_POLL_INTERVAL_MS ?? process.env.WORKER_POLL_INTERVAL_MS ?? 3000);
@@ -155,6 +155,7 @@ if (isMain) {
   } else {
     try {
       configureGitCredentials();
+      configureGitIdentity();
       const isLocal = dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1');
       activePool = new Pool({
         connectionString: dbUrl,

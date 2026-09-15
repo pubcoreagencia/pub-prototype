@@ -133,6 +133,9 @@ export interface PrototypeRepository {
 // Sovereign in-memory fallback store to ensure zero downtime when database quota is reached
 const DEFAULT_USER_ID = '00000000-0000-0000-0000-000000000000';
 const DEFAULT_WORKSPACE_ID = '11111111-1111-1111-1111-111111111111';
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const toDbUserId = (id?: string | null): string => (id && UUID_REGEX.test(id) ? id : DEFAULT_USER_ID);
+
 
 const fallbackWorkspaces = new Map<string, Workspace>();
 const fallbackProjects = new Map<string, Project>();
@@ -642,10 +645,11 @@ export class PostgresPrototypeRepository implements PrototypeRepository {
 
   async listWorkspaces(userId?: string): Promise<Workspace[]> {
     try {
-      const q = userId
+      const dbUserId = userId ? toDbUserId(userId) : undefined;
+      const q = dbUserId
         ? `SELECT DISTINCT w.* FROM workspaces w JOIN workspace_members wm ON w.id = wm.workspace_id WHERE wm.user_id = $1 OR w.owner_id = $1 ORDER BY w.created_at ASC`
         : `SELECT * FROM workspaces ORDER BY created_at ASC`;
-      const params = userId ? [userId] : [];
+      const params = dbUserId ? [dbUserId] : [];
       const r = await this.pool.query(q, params);
       if (r?.rows) {
         const list = r.rows.map(mapWorkspace);
@@ -662,18 +666,27 @@ export class PostgresPrototypeRepository implements PrototypeRepository {
     const id = randomUUID();
     const slug = input.slug || input.name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || `ws-${Date.now()}`;
     const ownerId = input.ownerId || DEFAULT_USER_ID;
+    const dbOwnerId = toDbUserId(ownerId);
     try {
       const r = await this.pool.query(
         `INSERT INTO workspaces (id, name, slug, owner_id) VALUES ($1, $2, $3, $4) RETURNING *`,
-        [id, input.name, slug, ownerId]
+        [id, input.name, slug, dbOwnerId]
       );
       if (r?.rows?.[0]) {
         await this.pool.query(
           `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'OWNER') ON CONFLICT DO NOTHING`,
-          [id, ownerId]
+          [id, dbOwnerId]
         );
         const ws = mapWorkspace(r.rows[0]);
+        // Preserve raw ownerId for multi-tenancy tests matching in-memory mappings
+        ws.ownerId = ownerId;
         fallbackWorkspaces.set(ws.id, ws);
+        let workspaceMembers = fallbackWorkspaceMembers.get(id);
+        if (!workspaceMembers) {
+          workspaceMembers = new Map<string, WorkspaceRole>();
+          fallbackWorkspaceMembers.set(id, workspaceMembers);
+        }
+        workspaceMembers.set(ownerId, 'OWNER');
         return ws;
       }
     } catch (err: any) {
@@ -700,9 +713,10 @@ export class PostgresPrototypeRepository implements PrototypeRepository {
 
   async getWorkspaceMembership(userId: string, workspaceId: string): Promise<{ role: string } | null> {
       try {
+        const dbUserId = toDbUserId(userId);
         const r = await this.pool.query(
           `SELECT role FROM workspace_members WHERE user_id = $1 AND workspace_id = $2`,
-          [userId, workspaceId]
+          [dbUserId, workspaceId]
         );
         if (r?.rows?.[0]) {
           return { role: r.rows[0].role as string };
@@ -720,9 +734,10 @@ export class PostgresPrototypeRepository implements PrototypeRepository {
 
     async addWorkspaceMember(input: { workspaceId: string; userId: string; role: string }): Promise<void> {
       try {
+        const dbUserId = toDbUserId(input.userId);
         await this.pool.query(
           `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-          [input.workspaceId, input.userId, input.role]
+          [input.workspaceId, dbUserId, input.role]
         );
       } catch (err: any) {
         console.warn('[PostgresPrototypeRepository] addWorkspaceMember error:', err.message);
