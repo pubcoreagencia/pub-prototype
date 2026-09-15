@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import path from 'node:path';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -20,6 +21,7 @@ import { PrototypeHandoffService, type PrototypeHandoffInput, type PdlTaskIngest
 import { HttpPdlTaskIngestionPort, FailClosedPdlTaskIngestionPort } from '../handoff/http-client.js';
 import { PreviewRecoveryService } from '../preview/preview-recovery.js';
 import { AuthService } from '../auth/auth.js';
+import { VerificationGate } from '../verification/verification-gate.js';
 
 export const createPpApp = (
   pool?: Pool,
@@ -32,6 +34,7 @@ export const createPpApp = (
   const protoRepo = prototypes ?? new PostgresPrototypeRepository(activePool);
   const authService = new AuthService(protoRepo);
   const previewRecovery = new PreviewRecoveryService(protoRepo);
+  const verificationGate = new VerificationGate(protoRepo);
   if (typeof protoRepo.initializeSchema === 'function') {
     void protoRepo.initializeSchema().catch(err => console.warn('[PP API] Auto schema init notice:', err.message));
   }
@@ -274,12 +277,15 @@ export const createPpApp = (
       const files = await protoRepo.listSessionFiles(sessionId);
       if (files.length > 0) {
         const nativeUrl = `/prototype/sessions/${sessionId}/preview/`;
-        await protoRepo.updateSession(sessionId, { previewUrl: nativeUrl, status: 'READY' });
-        prototypeEvents.emit({
-          sessionId,
-          type: 'PREVIEW_READY',
-          payload: { sessionId, url: nativeUrl, mode: 'native' }
-        });
+        // Only update previewUrl if session is already READY and verified
+        if (session.status === 'READY') {
+          await protoRepo.updateSession(sessionId, { previewUrl: nativeUrl });
+          prototypeEvents.emit({
+            sessionId,
+            type: 'PREVIEW_READY',
+            payload: { sessionId, url: nativeUrl, mode: 'native' }
+          });
+        }
         return res.json({
           ok: true,
           previewUrl: nativeUrl,
@@ -523,6 +529,11 @@ export const createPpApp = (
   // PATCH /prototype/sessions/:id
   app.patch('/prototype/sessions/:id', authService.requireSessionRole('MEMBER'), async (req, res, next) => {
     try {
+      // Disallow setting status = 'READY' directly via PATCH to prevent bypass of VerificationGate
+      if (req.body?.status === 'READY') {
+        return res.status(400).json({ error: 'FORBIDDEN_PROMOTION: status READY must be granted via VerificationGate' });
+      }
+
       const allowed = ['status', 'mode', 'previewUrl', 'previewRuntime', 'workspacePath', 'lastCheckpointSha'] as const;
       const patch = Object.fromEntries(
         allowed
@@ -531,7 +542,7 @@ export const createPpApp = (
       );
       const session = await protoRepo.updateSession(String(req.params.id), patch);
       if (!session) return res.sendStatus(404);
-      const eventType = patch.status === 'READY' ? 'PREVIEW_READY' : patch.status === 'FAILED' ? 'ERROR' : null;
+      const eventType = patch.status === 'FAILED' ? 'ERROR' : null;
       if (eventType) prototypeEvents.emit({ sessionId: session.id, type: eventType, payload: { status: session.status, previewUrl: session.previewUrl } });
       return res.json(session);
     } catch (e) {
@@ -643,10 +654,92 @@ export const createPpApp = (
       const { promptIndex, prompt, commitSha, previewUrl, buildPassed } = req.body ?? {};
       if (!Number.isInteger(promptIndex) || promptIndex < 1 || typeof prompt !== 'string') return res.status(400).json({ error: 'promptIndex and prompt are required' });
       const checkpoint = await protoRepo.createCheckpoint({ sessionId: session.id, promptIndex, prompt, commitSha: commitSha ?? null, previewUrl: previewUrl ?? null, buildPassed: buildPassed === true });
-      const updated = await protoRepo.updateSession(session.id, { lastCheckpointSha: checkpoint.commitSha, previewUrl: checkpoint.previewUrl, status: checkpoint.buildPassed ? 'READY' : 'FAILED' });
       prototypeEvents.emit({ sessionId: session.id, type: 'CHECKPOINT_CREATED', payload: checkpoint as unknown as Record<string, unknown> });
-      if (updated) prototypeEvents.emit({ sessionId: session.id, type: checkpoint.buildPassed ? 'PREVIEW_READY' : 'PREVIEW_FAILED', payload: { previewUrl: updated.previewUrl, buildPassed: checkpoint.buildPassed } });
+
+      const resolvedWorkspace = session.workspacePath ?? repoPath(session.id);
+      const expectedCurrentSha = session.lastCheckpointSha;
+      if (checkpoint.buildPassed && checkpoint.commitSha && existsSync(resolvedWorkspace)) {
+        try {
+          const verification = await verificationGate.verify(session.id, checkpoint.id, resolvedWorkspace);
+          if (verification.status === 'PASSED') {
+            const promo = await verificationGate.promoteIfValid(
+              session.id,
+              checkpoint.id,
+              resolvedWorkspace,
+              checkpoint.previewUrl || `/prototype/sessions/${session.id}/preview/`,
+              undefined,
+              expectedCurrentSha
+            );
+            if (promo.promoted) {
+              prototypeEvents.emit({ sessionId: session.id, type: 'PREVIEW_READY', payload: { previewUrl: checkpoint.previewUrl, buildPassed: true } });
+            } else {
+              prototypeEvents.emit({ sessionId: session.id, type: 'PREVIEW_FAILED', payload: { previewUrl: checkpoint.previewUrl, buildPassed: false, reason: promo.reason } });
+            }
+          } else {
+            prototypeEvents.emit({ sessionId: session.id, type: 'PREVIEW_FAILED', payload: { previewUrl: checkpoint.previewUrl, buildPassed: false } });
+          }
+        } catch {
+          // Verification failed or was skipped
+        }
+      } else if (!checkpoint.buildPassed) {
+        prototypeEvents.emit({ sessionId: session.id, type: 'PREVIEW_FAILED', payload: { previewUrl: checkpoint.previewUrl, buildPassed: false } });
+      }
+
       return res.status(201).json(checkpoint);
+    } catch (e) {
+      return next(e);
+    }
+  });
+
+  // GET /prototype/sessions/:id/verifications
+  app.get('/prototype/sessions/:id/verifications', authService.requireSessionRole('VIEWER'), async (req, res, next) => {
+    try {
+      const sessionId = String(req.params.id);
+      const session = await protoRepo.getSession(sessionId);
+      if (!session) return res.sendStatus(404);
+      const verifications = await protoRepo.listVerifications(sessionId);
+      return res.json(verifications);
+    } catch (e) {
+      return next(e);
+    }
+  });
+
+  // GET /prototype/sessions/:id/verifications/:verId
+  app.get('/prototype/sessions/:id/verifications/:verId', authService.requireSessionRole('VIEWER'), async (req, res, next) => {
+    try {
+      const sessionId = String(req.params.id);
+      const session = await protoRepo.getSession(sessionId);
+      if (!session) return res.sendStatus(404);
+      const verification = await protoRepo.getVerification(String(req.params.verId));
+      if (!verification || verification.sessionId !== session.id) return res.sendStatus(404);
+      return res.json(verification);
+    } catch (e) {
+      return next(e);
+    }
+  });
+
+  // POST /prototype/sessions/:id/checkpoints/:checkpointId/verify
+  app.post('/prototype/sessions/:id/checkpoints/:checkpointId/verify', authService.requireSessionRole('MEMBER'), async (req, res, next) => {
+    try {
+      const sessionId = String(req.params.id);
+      const checkpointId = String(req.params.checkpointId);
+      const session = await protoRepo.getSession(sessionId);
+      if (!session) return res.sendStatus(404);
+
+      const resolvedWorkspace = session.workspacePath ?? repoPath(session.id);
+      const expectedCurrentSha = session.lastCheckpointSha;
+      const verification = await verificationGate.verify(sessionId, checkpointId, resolvedWorkspace);
+      if (verification.status === 'PASSED') {
+        await verificationGate.promoteIfValid(
+          sessionId,
+          checkpointId,
+          resolvedWorkspace,
+          session.previewUrl || `/prototype/sessions/${sessionId}/preview/`,
+          undefined,
+          expectedCurrentSha
+        );
+      }
+      return res.json(verification);
     } catch (e) {
       return next(e);
     }

@@ -1,7 +1,7 @@
 export const PROTOTYPE_MODES = ['PROTOTYPE', 'DEVELOPMENT'] as const;
 export type PrototypeMode = typeof PROTOTYPE_MODES[number];
 
-export const PROTOTYPE_SESSION_STATUSES = ['CREATING','READY','BUILDING','PREVIEWING','FAILED','APPROVED','PROMOTED','ARCHIVED'] as const;
+export const PROTOTYPE_SESSION_STATUSES = ['CREATING','READY','BUILDING','VERIFYING','PREVIEWING','FAILED','APPROVED','PROMOTED','ARCHIVED'] as const;
 export type PrototypeSessionStatus = typeof PROTOTYPE_SESSION_STATUSES[number];
 
 export const PROTOTYPE_EVENT_TYPES = [
@@ -25,6 +25,11 @@ export const PROTOTYPE_EVENT_TYPES = [
   'BUILD_STARTED',
   'BUILD_PASSED',
   'BUILD_FAILED',
+  'VERIFICATION_STARTED',
+  'VERIFICATION_STEP_PASSED',
+  'VERIFICATION_STEP_FAILED',
+  'VERIFICATION_PASSED',
+  'VERIFICATION_FAILED',
   'PREVIEW_STARTED',
   'PREVIEW_READY',
   'PREVIEW_FAILED',
@@ -123,6 +128,48 @@ export interface CreatePrototypeSession {
 export interface PrototypeCheckpoint { id:string; sessionId:string; promptIndex:number; prompt:string; commitSha:string|null; previewUrl:string|null; buildPassed:boolean; createdAt:Date; }
 export interface PrototypeEvent<TPayload extends Record<string, unknown> = Record<string, unknown>> { id:string; sessionId:string; type:PrototypeEventType; sequence:number; timestamp:Date; payload:TPayload; }
 export interface PrototypePromotion { id?: string; sessionId:string; fromMode:Extract<PrototypeMode,'PROTOTYPE'>; toMode:Extract<PrototypeMode,'DEVELOPMENT'>; repository:string; branch:string; checkpointSha:string|null; promotedAt:Date; }
+
+// === VERIFICATION GATE CONTRACTS ===
+export type VerificationStatus = 'PENDING' | 'RUNNING' | 'PASSED' | 'FAILED';
+export type VerificationStepStatus = 'PASS' | 'FAIL' | 'NOT_APPLICABLE';
+
+export interface VerificationStepEvidence {
+  name: 'identity' | 'artifact_integrity' | 'build' | 'runtime' | 'product_surface' | 'context_smoke';
+  status: VerificationStepStatus;
+  duration_ms: number;
+  command?: string;
+  exit_code?: number | null;
+  http_status?: number | null;
+  stdout?: string;
+  stderr?: string;
+  error_type?: string;
+  error_summary?: string;
+  details?: Record<string, unknown>;
+}
+
+export interface VerificationEvidence {
+  pipeline_version: string;
+  steps: VerificationStepEvidence[];
+  overall_status: VerificationStatus;
+  total_duration_ms: number;
+  environment?: Record<string, unknown>;
+  error_type?: string | null;
+  error_summary?: string | null;
+}
+
+export interface PrototypeVerification {
+  id: string;
+  sessionId: string;
+  checkpointId: string;
+  commitSha: string;
+  pipelineVersion: string;
+  status: VerificationStatus;
+  evidence: VerificationEvidence;
+  startedAt: Date;
+  finishedAt: Date | null;
+  durationMs: number | null;
+  createdAt: Date;
+}
 
 export interface PrototypeMessage {
   id: string;

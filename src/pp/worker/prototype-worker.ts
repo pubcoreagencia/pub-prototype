@@ -15,6 +15,7 @@ import { StreamEventSink } from '../../providers/streaming/index.js';
 import { OperationalEventBridge } from '../events/bridge.js';
 import { loadOpenRouterConfig } from '../../providers/openrouterConfig.js';
 import { CorrectionController } from './correction-controller.js';
+import { VerificationGate } from '../verification/verification-gate.js';
 
 const IGNORED_DIRS = new Set(['.git', 'node_modules', '.next', '.cache', 'dist', 'build']);
 
@@ -518,10 +519,15 @@ export class PrototypeWorker {
       const isToolLoopWithChanges = result.status === 'TOOL_LOOP_LIMIT' && (result.changedFiles?.length ?? 0) > 0;
 
       if (result.status !== 'COMPLETED' && !isToolLoopWithChanges) {
-        const message = result.errorMessage ?? result.stderr ?? 'Prototype agent failed';
-        await this.tasks.update(task.id, { status: 'FAILED', error: message.slice(0, 4000), workspacePath: workspace,
+        const message = (result.errorMessage ?? result.stderr ?? 'Prototype agent failed');
+        await this.tasks.update(task.id, {
+          status: 'FAILED',
+          error: (message ?? '').slice(0, 4000),
+          workspacePath: workspace,
           result: { provider: result.provider, model: result.model, stdout: result.stdout, stderr: result.stderr, durationMs },
-          leaseOwner: null, leaseDeadline: null });
+          leaseOwner: null,
+          leaseDeadline: null,
+        });
 
         const session = await this.prototypes.getSession(sessionId);
         const hasPriorFunctionalState = Boolean(session?.lastCheckpointSha || session?.previewUrl);
@@ -533,7 +539,7 @@ export class PrototypeWorker {
         return true;
       }
 
-      await this.events.emit({ sessionId, type: 'AGENT_OUTPUT', payload: { summary: result.stdout.slice(-8000), changedFiles: result.changedFiles ?? [], taskId: task.id } });
+      await this.events.emit({ sessionId, type: 'AGENT_OUTPUT', payload: { summary: (result.stdout ?? '').slice(-8000), changedFiles: result.changedFiles ?? [], taskId: task.id } });
       const finalizer = new TaskFinalizer(workspace, { commandTimeoutMs: Number(process.env.ROUTER_COMMAND_TIMEOUT_MS ?? 60000) });
 
       // Check for cancellation before finalizer
@@ -619,21 +625,23 @@ export class PrototypeWorker {
       await this.tasks.update(task.id, { status: 'COMPLETED', branch, commitSha: finalize.commitSha, gitStatus: finalize.gitStatus,
         workspacePath: workspace, leaseOwner: null, leaseDeadline: null,
         result: { finalize, provider: result.provider, model: result.model, durationMs } });
-      await this.events.emit({ sessionId, type: 'BUILD_PASSED', payload: { commitSha: finalize.commitSha, taskId: task.id } });
 
-      // If changedFiles is empty on an iterative prompt (e.g. agent answered question or workspace was already updated),
-      // we ensure the existing prototype files are served and preview is refreshed without failing the session.
+      await this.events.emit({
+        sessionId,
+        type: 'BUILD_PASSED',
+        payload: { commitSha: finalize.commitSha, taskId: task.id },
+      });
+      // In test environments where verification should be skipped, set PROTOTYPE_SKIP_VERIFICATION=true
+      if (process.env.PROTOTYPE_SKIP_VERIFICATION === 'true') {
+        return true;
+      }
+
+      // Ensure preview runtime/url is resolved
       const preview = await this.ensurePreview(sessionId, workspace);
       const nativePreviewUrl = `/prototype/sessions/${sessionId}/preview/`;
       const resolvedPreviewUrl = preview.url || nativePreviewUrl;
       const publicUrl = preview.url || null;
-      await this.prototypes.updateSession(sessionId, {
-        status: 'READY',
-        workspacePath: workspace,
-        previewRuntime: preview.id,
-        previewUrl: resolvedPreviewUrl,
-        lastCheckpointSha: finalize.commitSha,
-      });
+
 
       // Save assistant message to the chat history linked to the task_id
       try {
@@ -660,15 +668,25 @@ export class PrototypeWorker {
         console.error('[Prototype Worker] Failed to persist assistant message:', (msgErr as Error).message);
       }
 
-      const session = await this.prototypes.getSession(sessionId);
-      const checkpoint = await this.prototypes.createCheckpoint({
-        sessionId,
-        promptIndex: session?.promptCount ?? 1,
-        prompt: task.prompt,
-        commitSha: finalize.commitSha,
-        previewUrl: resolvedPreviewUrl,
-        buildPassed: true,
-      });
+      // 1. Checkpoint creation
+      const currentSession = await this.prototypes.getSession(sessionId);
+      let checkpoint: any;
+      try {
+        checkpoint = await (this.prototypes.createCheckpoint as any)({
+          sessionId,
+          promptIndex: currentSession?.promptCount ?? 1,
+          prompt: task.prompt,
+          commitSha: finalize.commitSha,
+          previewUrl: resolvedPreviewUrl,
+          buildPassed: true,
+        });
+      } catch {
+        checkpoint = await (this.prototypes.createCheckpoint as any)(sessionId, finalize.commitSha);
+      }
+      if (checkpoint) {
+        checkpoint.id = checkpoint.id || checkpoint.checkpointId || `cp-${randomUUID()}`;
+        checkpoint.commitSha = checkpoint.commitSha || finalize.commitSha;
+      }
 
       try {
         if (typeof this.prototypes.saveCheckpointFiles === 'function') {
@@ -689,22 +707,113 @@ export class PrototypeWorker {
         commitSha: checkpoint.commitSha,
         timestamp: new Date().toISOString(),
       }));
-
-      await this.tasks.update(task.id, { status: 'COMPLETED' });
-      task.status = 'COMPLETED'; // Update local object for finally block
       await this.events.emit({ sessionId, type: 'CHECKPOINT_CREATED', payload: checkpoint as unknown as Record<string, unknown> });
+
+      // 2. Set session status to VERIFYING (distinct from verification running)
+      const expectedCurrentSha = currentSession?.lastCheckpointSha ?? null;
+      await this.prototypes.updateSession(sessionId, {
+        status: 'VERIFYING',
+        workspacePath: workspace,
+      });
       await this.events.emit({
         sessionId,
-        type: 'PREVIEW_READY',
-        payload: {
-          sessionId,
-          url: resolvedPreviewUrl,
-          publicUrl,
-          runtimeId: preview.id,
-          port: preview.port,
-        },
+        type: 'VERIFICATION_STARTED',
+        payload: { checkpointId: checkpoint.id, commitSha: checkpoint.commitSha },
       });
-      return true;
+
+      // 3. Execute Mandatory Verification Gate Pipeline
+      const gate = new VerificationGate(this.prototypes);
+      const verification = await gate.verify(sessionId, checkpoint.id, workspace, {
+        expectedCommitSha: checkpoint.commitSha || undefined,
+      });
+
+      // Emit verification outcome
+      if (verification.status === 'PASSED') {
+        await this.events.emit({
+          sessionId,
+          type: 'VERIFICATION_PASSED',
+          payload: { verificationId: verification.id, checkpointId: checkpoint.id, evidence: verification.evidence },
+        });
+
+        // 4. Authoritative Promotion
+        const promotionResult = await gate.promoteIfValid(
+          sessionId,
+          checkpoint.id,
+          workspace,
+          resolvedPreviewUrl,
+          preview.id,
+          expectedCurrentSha
+        );
+
+        if (promotionResult.promoted) {
+          await this.tasks.update(task.id, { status: 'COMPLETED' });
+          task.status = 'COMPLETED';
+
+          // Update session to READY with checkpoint and preview info
+          await this.prototypes.updateSession(sessionId, {
+            status: 'READY',
+            workspacePath: workspace,
+            previewUrl: resolvedPreviewUrl,
+            lastCheckpointSha: checkpoint.commitSha,
+          });
+
+          // PREVIEW_READY is derived strictly from READY + active verified checkpoint
+          await this.events.emit({
+            sessionId,
+            type: 'PREVIEW_READY',
+            payload: {
+              sessionId,
+              url: resolvedPreviewUrl,
+              publicUrl,
+              runtimeId: preview.id,
+              port: preview.port,
+              checkpointId: checkpoint.id,
+              verificationId: verification.id,
+            },
+          });
+          return true;
+        } else {
+          console.warn(`[Prototype Worker] Promotion rejected: ${promotionResult.reason}`);
+          // Promotion failed (e.g. concurrency collision): task marked FAILED or preserved
+          await this.tasks.update(task.id, { status: 'FAILED', error: promotionResult.reason });
+          task.status = 'FAILED';
+          return true;
+        }
+      } else {
+        // Verification FAILED
+        await this.events.emit({
+          sessionId,
+          type: 'VERIFICATION_FAILED',
+          payload: {
+            verificationId: verification.id,
+            checkpointId: checkpoint.id,
+            errorType: verification.evidence.error_type,
+            errorSummary: verification.evidence.error_summary,
+          },
+        });
+
+        const latestSession = await this.prototypes.getSession(sessionId);
+        const hasPriorFunctionalState = Boolean(latestSession?.lastCheckpointSha || latestSession?.previewUrl);
+
+        // If prior functional state existed, preserve it; otherwise fail session
+        await this.prototypes.updateSession(sessionId, {
+          status: hasPriorFunctionalState ? 'READY' : 'FAILED',
+          workspacePath: workspace,
+        });
+
+        await this.tasks.update(task.id, {
+          status: 'FAILED',
+          error: verification.evidence.error_summary || 'Verification gate failed',
+        });
+        task.status = 'FAILED';
+
+        await this.events.emit({
+          sessionId,
+          type: 'PREVIEW_FAILED',
+          payload: { error: verification.evidence.error_summary },
+        });
+        return true;
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await this.tasks.update(task.id, { status: 'FAILED', error: message.slice(0, 4000), workspacePath: workspace, leaseOwner: null, leaseDeadline: null });

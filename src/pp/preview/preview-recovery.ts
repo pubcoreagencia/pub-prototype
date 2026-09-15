@@ -7,6 +7,7 @@ import { LocalPreviewRuntime } from './local-preview-runtime.js';
 import { PublicPreviewRuntime } from './public-preview-runtime.js';
 import type { PreviewRuntime, PreviewRuntimeInfo } from './preview-runtime.js';
 import { PostgresPrototypeRepository } from '../persistence/repository.js';
+import { VerificationGate } from '../verification/verification-gate.js';
 
 export interface PreviewRecoveryResult {
   sessionId: string;
@@ -25,6 +26,7 @@ export interface PreviewRecoveryError {
     | 'GIT_CHECKOUT_FAILED'
     | 'NPM_INSTALL_FAILED'
     | 'PREVIEW_START_FAILED'
+    | 'VERIFICATION_REQUIRED'
     | 'RECOVERY_FAILED';
   message: string;
 }
@@ -162,7 +164,7 @@ export class PreviewRecoveryService {
       } as PreviewRecoveryError;
     }
 
-    const workspacePath = await this.reconstructWorkspace(session as PrototypeSession);
+    const { workspacePath, wasRebuilt } = await this.reconstructWorkspace(session as PrototypeSession);
 
     if (session.previewRuntime) {
       try {
@@ -217,6 +219,22 @@ export class PreviewRecoveryService {
       }
     }
 
+    // If artifact was rebuilt/recreated, verify before promoting/updating session
+    if (wasRebuilt && typeof this.prototypes.listCheckpoints === 'function') {
+      const checkpoints = await this.prototypes.listCheckpoints(sessionId);
+      const checkpoint = checkpoints.find(c => c.commitSha === session.lastCheckpointSha) || checkpoints[0];
+      if (checkpoint) {
+        const gate = new VerificationGate(this.prototypes);
+        const verification = await gate.verify(sessionId, checkpoint.id, workspacePath);
+        if (verification.status !== 'PASSED') {
+          throw {
+            code: 'VERIFICATION_REQUIRED',
+            message: `Rebuilt artifact failed mandatory verification: ${verification.evidence.error_summary || 'Verification failed'}`,
+          } as PreviewRecoveryError;
+        }
+      }
+    }
+
     await this.prototypes.updateSession(sessionId, {
       previewUrl: info.url,
       previewRuntime: info.id,
@@ -237,7 +255,7 @@ export class PreviewRecoveryService {
    * - Otherwise: removes and re-clones
    * - For NODE workspaces: runs `npm install` after checkout
    */
-  private async reconstructWorkspace(session: PrototypeSession): Promise<string> {
+  private async reconstructWorkspace(session: PrototypeSession): Promise<{ workspacePath: string; wasRebuilt: boolean }> {
     const { id, repository, lastCheckpointSha, branch, workspacePath } = session;
 
     if (!repository) {
@@ -259,9 +277,9 @@ export class PreviewRecoveryService {
     if (exists && hasGit) {
       const currentHead = getCurrentHead(target);
       if (currentHead === lastCheckpointSha) {
-        // Já está no SHA correto — reutiliza
+        // Já está no SHA correto — reutiliza sem rebuild
         await this.installDepsIfNeeded(target);
-        return target;
+        return { workspacePath: target, wasRebuilt: false };
       }
       // SHA divergente — recria de forma segura
       await rm(target, { recursive: true, force: true });
@@ -317,7 +335,7 @@ export class PreviewRecoveryService {
     }
 
     await this.installDepsIfNeeded(target);
-    return target;
+    return { workspacePath: target, wasRebuilt: true };
   }
 
   /**

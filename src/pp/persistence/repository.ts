@@ -15,6 +15,8 @@ import type {
   Project,
   ProjectStatus,
   CheckpointFile,
+  PrototypeVerification,
+  VerificationEvidence,
 } from '../domain/domain.js';
 
 const mapSession = (r: Record<string, unknown>): PrototypeSession => ({
@@ -38,6 +40,20 @@ const mapCheckpoint = (r: Record<string, unknown>): PrototypeCheckpoint => ({
   id: r.id as string, sessionId: r.session_id as string, promptIndex: r.prompt_index as number,
   prompt: r.prompt as string, commitSha: r.commit_sha as string | null,
   previewUrl: r.preview_url as string | null, buildPassed: r.build_passed as boolean, createdAt: r.created_at as Date,
+});
+
+const mapVerification = (r: Record<string, unknown>): PrototypeVerification => ({
+  id: r.id as string,
+  sessionId: r.session_id as string,
+  checkpointId: r.checkpoint_id as string,
+  commitSha: r.commit_sha as string,
+  pipelineVersion: (r.pipeline_version as string) || 'v1',
+  status: r.status as any,
+  evidence: (typeof r.evidence === 'string' ? JSON.parse(r.evidence) : r.evidence) as VerificationEvidence,
+  startedAt: r.started_at as Date,
+  finishedAt: (r.finished_at as Date) || null,
+  durationMs: (r.duration_ms as number) ?? null,
+  createdAt: r.created_at as Date,
 });
 
 const mapProject = (r: Record<string, unknown>): Project => ({
@@ -127,6 +143,14 @@ export interface PrototypeRepository {
   getCheckpointFile(checkpointId: string, path: string): Promise<CheckpointFile | null>;
   listSessionFiles(sessionId: string): Promise<CheckpointFile[]>;
   getLatestSessionFile(sessionId: string, path: string): Promise<CheckpointFile | null>;
+
+  // PP 2.0 Mandatory Verification Gate & Audit Trail
+  createVerification(input: Omit<PrototypeVerification, 'id' | 'createdAt'>): Promise<PrototypeVerification>;
+  getVerification(id: string): Promise<PrototypeVerification | null>;
+  getLatestVerificationForCheckpoint(checkpointId: string): Promise<PrototypeVerification | null>;
+  listVerifications(sessionId: string): Promise<PrototypeVerification[]>;
+  compareAndPromoteSession(sessionId: string, expectedCurrentCheckpointSha: string | null, targetCheckpoint: PrototypeCheckpoint, previewUrl: string, previewRuntime?: string): Promise<PrototypeSession | null>;
+
   initializeSchema(): Promise<void>;
 }
 
@@ -144,6 +168,7 @@ const fallbackCheckpoints = new Map<string, PrototypeCheckpoint[]>();
 const fallbackPromotions = new Map<string, PrototypePromotion>();
 const fallbackMessages = new Map<string, PrototypeMessage[]>();
 const fallbackCheckpointFiles = new Map<string, CheckpointFile[]>();
+const fallbackVerifications = new Map<string, PrototypeVerification[]>();
 const fallbackWorkspaceMembers = new Map<string, Map<string, WorkspaceRole>>([
       [DEFAULT_WORKSPACE_ID,
         new Map<string, WorkspaceRole>([
@@ -1022,6 +1047,186 @@ export class PostgresPrototypeRepository implements PrototypeRepository {
     return matching[0] || null;
   }
 
+  async createVerification(input: Omit<PrototypeVerification, 'id' | 'createdAt'>): Promise<PrototypeVerification> {
+    const id = randomUUID();
+    const durationMs = input.durationMs ?? (input.finishedAt ? input.finishedAt.getTime() - input.startedAt.getTime() : null);
+    try {
+      const r = await this.pool.query(
+        `INSERT INTO prototype_verifications (id, session_id, checkpoint_id, commit_sha, pipeline_version, status, evidence, started_at, finished_at, duration_ms)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING *`,
+        [
+          id,
+          input.sessionId,
+          input.checkpointId,
+          input.commitSha,
+          input.pipelineVersion || 'v1',
+          input.status,
+          JSON.stringify(input.evidence || {}),
+          input.startedAt,
+          input.finishedAt,
+          durationMs,
+        ]
+      );
+      if (r?.rows?.[0]) {
+        const v = mapVerification(r.rows[0]);
+        const list = fallbackVerifications.get(input.sessionId) || [];
+        list.unshift(v);
+        fallbackVerifications.set(input.sessionId, list);
+        return v;
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] DB quota/error on createVerification:', err.message);
+    }
+    const verification: PrototypeVerification = {
+      id,
+      sessionId: input.sessionId,
+      checkpointId: input.checkpointId,
+      commitSha: input.commitSha,
+      pipelineVersion: input.pipelineVersion || 'v1',
+      status: input.status,
+      evidence: input.evidence,
+      startedAt: input.startedAt,
+      finishedAt: input.finishedAt,
+      durationMs,
+      createdAt: new Date(),
+    };
+    const list = fallbackVerifications.get(input.sessionId) || [];
+    list.unshift(verification);
+    fallbackVerifications.set(input.sessionId, list);
+    return verification;
+  }
+
+  async getVerification(id: string): Promise<PrototypeVerification | null> {
+    try {
+      const r = await this.pool.query(
+        `SELECT * FROM prototype_verifications WHERE id = $1`,
+        [id]
+      );
+      if (r?.rows?.[0]) {
+        return mapVerification(r.rows[0]);
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] DB quota/error on getVerification:', err.message);
+    }
+    for (const list of fallbackVerifications.values()) {
+      const found = list.find(v => v.id === id);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  async getLatestVerificationForCheckpoint(checkpointId: string): Promise<PrototypeVerification | null> {
+    try {
+      const r = await this.pool.query(
+        `SELECT * FROM prototype_verifications WHERE checkpoint_id = $1 ORDER BY created_at DESC LIMIT 1`,
+        [checkpointId]
+      );
+      if (r?.rows?.[0]) {
+        return mapVerification(r.rows[0]);
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] DB quota/error on getLatestVerificationForCheckpoint:', err.message);
+    }
+    for (const list of fallbackVerifications.values()) {
+      const matching = list.filter(v => v.checkpointId === checkpointId);
+      if (matching.length > 0) {
+        return matching.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+      }
+    }
+    return null;
+  }
+
+  async listVerifications(sessionId: string): Promise<PrototypeVerification[]> {
+    try {
+      const r = await this.pool.query(
+        `SELECT * FROM prototype_verifications WHERE session_id = $1 ORDER BY created_at DESC`,
+        [sessionId]
+      );
+      if (r?.rows) {
+        const dbList = r.rows.map(mapVerification);
+        fallbackVerifications.set(sessionId, dbList);
+        return dbList;
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] DB quota/error on listVerifications:', err.message);
+    }
+    return fallbackVerifications.get(sessionId) || [];
+  }
+
+  async compareAndPromoteSession(
+    sessionId: string,
+    expectedCurrentCheckpointSha: string | null,
+    targetCheckpoint: PrototypeCheckpoint,
+    previewUrl: string,
+    previewRuntime?: string
+  ): Promise<PrototypeSession | null> {
+    try {
+      let r;
+      if (expectedCurrentCheckpointSha === null) {
+        r = await this.pool.query(
+          `UPDATE prototype_sessions
+           SET status = 'READY',
+               last_checkpoint_sha = $1,
+               preview_url = $2,
+               preview_runtime = COALESCE($3, preview_runtime),
+               updated_at = now()
+           WHERE id = $4
+             AND (last_checkpoint_sha IS NULL OR last_checkpoint_sha = $1)
+           RETURNING *`,
+          [targetCheckpoint.commitSha, previewUrl, previewRuntime || null, sessionId]
+        );
+      } else {
+        r = await this.pool.query(
+          `UPDATE prototype_sessions
+           SET status = 'READY',
+               last_checkpoint_sha = $1,
+               preview_url = $2,
+               preview_runtime = COALESCE($3, preview_runtime),
+               updated_at = now()
+           WHERE id = $4
+             AND last_checkpoint_sha = $5
+           RETURNING *`,
+          [targetCheckpoint.commitSha, previewUrl, previewRuntime || null, sessionId, expectedCurrentCheckpointSha]
+        );
+      }
+      if (r?.rows?.[0]) {
+        const session = mapSession(r.rows[0]);
+        fallbackSessions.set(session.id, session);
+        return session;
+      }
+      if (r?.rowCount === 0) {
+        // Concurrency conflict / stale promotion
+        return null;
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] DB quota/error on compareAndPromoteSession:', err.message);
+    }
+
+    // In-memory optimistic fallback
+    const current = fallbackSessions.get(sessionId);
+    if (!current) return null;
+    const currentSha = current.lastCheckpointSha;
+    const matchesExpected = expectedCurrentCheckpointSha === null
+      ? (currentSha === null || currentSha === targetCheckpoint.commitSha)
+      : currentSha === expectedCurrentCheckpointSha;
+
+    if (!matchesExpected) {
+      return null;
+    }
+
+    const updated: PrototypeSession = {
+      ...current,
+      status: 'READY',
+      lastCheckpointSha: targetCheckpoint.commitSha,
+      previewUrl,
+      previewRuntime: previewRuntime ?? current.previewRuntime,
+      updatedAt: new Date(),
+    };
+    fallbackSessions.set(sessionId, updated);
+    return updated;
+  }
+
   async initializeSchema(): Promise<void> {
     try {
       await this.pool.query(`
@@ -1073,6 +1278,42 @@ export class PostgresPrototypeRepository implements PrototypeRepository {
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           UNIQUE(checkpoint_id, path)
         );
+        CREATE TABLE IF NOT EXISTS prototype_verifications (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          session_id UUID NOT NULL REFERENCES prototype_sessions(id) ON DELETE RESTRICT,
+          checkpoint_id UUID NOT NULL REFERENCES prototype_checkpoints(id) ON DELETE RESTRICT,
+          commit_sha TEXT NOT NULL,
+          pipeline_version TEXT NOT NULL DEFAULT 'v1',
+          status TEXT NOT NULL CHECK (status IN ('PENDING', 'RUNNING', 'PASSED', 'FAILED')),
+          evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+          started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          finished_at TIMESTAMPTZ,
+          duration_ms INTEGER,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        CREATE INDEX IF NOT EXISTS prototype_verifications_session_idx ON prototype_verifications(session_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS prototype_verifications_checkpoint_idx ON prototype_verifications(checkpoint_id);
+        CREATE INDEX IF NOT EXISTS prototype_verifications_commit_idx ON prototype_verifications(commit_sha);
+        CREATE INDEX IF NOT EXISTS prototype_verifications_status_idx ON prototype_verifications(status);
+
+        CREATE OR REPLACE FUNCTION prevent_verification_mutation()
+        RETURNS TRIGGER AS $$
+        BEGIN
+          IF TG_OP = 'UPDATE' THEN
+            RAISE EXCEPTION 'UPDATE on prototype_verifications is forbidden: verification records are immutable audit records';
+          ELSIF TG_OP = 'DELETE' THEN
+            RAISE EXCEPTION 'DELETE on prototype_verifications is forbidden: verification records are immutable audit records';
+          END IF;
+          RETURN NULL;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        DROP TRIGGER IF EXISTS trg_prototype_verifications_immutable ON prototype_verifications;
+        CREATE TRIGGER trg_prototype_verifications_immutable
+        BEFORE UPDATE OR DELETE ON prototype_verifications
+        FOR EACH ROW
+        EXECUTE FUNCTION prevent_verification_mutation();
+
         DO $$
         DECLARE
           v_default_user_id UUID := '00000000-0000-0000-0000-000000000000';
