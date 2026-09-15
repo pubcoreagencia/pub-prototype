@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
@@ -28,6 +29,7 @@ describe('PUB Prototype 2.0 — Verification Gate Pipeline (V0..V5)', () => {
       connectionString: process.env.DATABASE_URL || 'postgres://pubprototype:local_secret_123@localhost:5432/pubprototype',
     });
     repo = new PostgresPrototypeRepository(pool);
+    await repo.initializeSchema();
     gate = new VerificationGate(repo);
 
     testSessionId = randomUUID();
