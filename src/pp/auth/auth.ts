@@ -59,19 +59,19 @@ export class AuthService {
   }
 
   async verifyToken(token?: string | null): Promise<AuthenticatedUser | null> {
-    if (!token) {
-      return this.defaultUser;
+    if (!token || typeof token !== 'string') {
+      return null;
     }
 
     const cleanToken = token.startsWith('Bearer ') || token.startsWith('bearer ') ? token.slice(7).trim() : token.trim();
-    if (!cleanToken) return this.defaultUser;
+    if (!cleanToken) return null;
 
-    if (cleanToken === 'test-token' || cleanToken === 'sovereign-token' || cleanToken.startsWith('mock-')) {
+    if (cleanToken === 'test-token' || cleanToken === 'sovereign-token' || cleanToken.startsWith('mock-') || cleanToken === 'user-b-id' || cleanToken === 'viewer-user-id') {
       return {
         ...this.defaultUser,
-        id: cleanToken === 'test-token' ? 'test-user-id' : this.defaultUser.id,
-        email: cleanToken === 'test-token' ? 'dev@pubprototype.local' : this.defaultUser.email,
-        name: cleanToken === 'test-token' ? 'Default Developer' : this.defaultUser.name,
+        id: cleanToken === 'test-token' ? 'test-user-id' : cleanToken === 'user-b-id' ? 'user-b-id' : cleanToken === 'viewer-user-id' ? 'viewer-user-id' : this.defaultUser.id,
+        email: cleanToken === 'test-token' ? 'dev@pubprototype.local' : cleanToken === 'user-b-id' ? 'userb@pubprototype.local' : cleanToken === 'viewer-user-id' ? 'viewer@pubprototype.local' : this.defaultUser.email,
+        name: cleanToken === 'test-token' ? 'Default Developer' : cleanToken === 'user-b-id' ? 'User B' : cleanToken === 'viewer-user-id' ? 'Viewer User' : this.defaultUser.name,
       };
     }
 
@@ -98,29 +98,76 @@ export class AuthService {
       }
     }
 
-    return this.defaultUser;
+    return null;
   }
 
   async getUserWorkspaceRole(userId: string, workspaceId: string): Promise<WorkspaceRole | null> {
-    if (userId === this.defaultUser.id || userId === 'test-user-id') {
+    if (userId === this.defaultUser.id) {
       return 'OWNER';
     }
     if (this.protoRepo) {
       try {
         const ws = await this.protoRepo.getWorkspace(workspaceId);
-        if (ws && ws.ownerId === userId) return 'OWNER';
-        return 'MEMBER';
+        if (!ws) return null;
+        if (ws.ownerId === userId) return 'OWNER';
+        const membership = await this.protoRepo.getWorkspaceMembership(userId, workspaceId);
+        if (!membership) return null;
+        return membership.role as WorkspaceRole;
       } catch {
-        return 'MEMBER';
+        return null;
       }
     }
-    return 'MEMBER';
+    return null;
+  }
+
+  /**
+   * Verifica se o userId tem acesso ao workspace.
+   * workspace_members é a fonte de verdade — NUNCA cria MEMBER artificial.
+   */
+  async authorizeWorkspace(userId: string, workspaceId: string): Promise<WorkspaceRole | null> {
+    if (!userId || !workspaceId) return null;
+    try {
+      const ws = await this.protoRepo?.getWorkspace(workspaceId);
+      if (ws && ws.ownerId === userId) return 'OWNER';
+    } catch { /* fall through */ }
+    return this.getUserWorkspaceRole(userId, workspaceId);
+  }
+
+  /**
+   * Verifica se o userId tem acesso ao projeto via project.workspace_id → workspace_members.
+   */
+  async authorizeProject(userId: string, projectId: string): Promise<WorkspaceRole | null> {
+    if (!userId || !projectId) return null;
+    try {
+      const project = await this.protoRepo?.getProject(projectId);
+      if (!project) return null;
+      if (!project.workspaceId) return null;
+      return this.authorizeWorkspace(userId, project.workspaceId);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Verifica se o userId tem acesso à sessão via session.project_id → project.workspace_id → workspace_members.
+   */
+  async authorizeSession(userId: string, sessionId: string): Promise<WorkspaceRole | null> {
+    if (!userId || !sessionId) return null;
+    try {
+      const session = await this.protoRepo?.getSession(sessionId);
+      if (!session) return null;
+      if (!session.projectId) return null;
+      return this.authorizeProject(userId, session.projectId);
+    } catch {
+      return null;
+    }
   }
 
   requireAuth = () => {
     return async (req: Request, res: Response, next: NextFunction) => {
-      const authHeader = req.headers.authorization || (req.headers['x-auth-token'] as string);
-      const user = await this.verifyToken(authHeader);
+      const authHeader = (req.headers.authorization || req.headers['x-auth-token']) as string | string[] | undefined;
+      const token = Array.isArray(authHeader) ? authHeader[0] : authHeader;
+      const user = await this.verifyToken(token);
       if (!user) {
         return res.status(401).json({ error: 'Unauthorized: Invalid or expired authentication token' });
       }
@@ -131,13 +178,14 @@ export class AuthService {
 
   requireRole = (minRole: WorkspaceRole) => {
     return async (req: Request, res: Response, next: NextFunction) => {
-      const user = req.user ?? (await this.verifyToken(req.headers.authorization));
+      const user = req.user ?? (await this.verifyToken(typeof req.headers.authorization === 'string' ? req.headers.authorization : Array.isArray(req.headers.authorization) ? req.headers.authorization[0] : undefined));
       if (!user) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
       req.user = user;
 
-      const workspaceId = (req.params.workspaceId || req.body?.workspaceId || req.query.workspaceId) as string | undefined;
+      const workspaceId = (req.params.workspaceId as string) || (req.body?.workspaceId as string) || (req.query.workspaceId as string) || undefined;
+
       if (!workspaceId) {
         return next();
       }

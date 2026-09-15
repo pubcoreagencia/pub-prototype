@@ -118,6 +118,8 @@ export interface PrototypeRepository {
   getProject(id: string): Promise<Project | null>;
   updateProject(id: string, patch: Partial<Pick<Project, 'name' | 'description' | 'status' | 'githubRepository' | 'githubBranch'>>): Promise<Project | null>;
   deleteProject(id: string): Promise<boolean>;
+  getWorkspaceMembership(userId: string, workspaceId: string): Promise<{ role: string } | null>;
+  addWorkspaceMember(input: { workspaceId: string; userId: string; role: string }): Promise<void>;
 
   // PP 2.0 Checkpoint Files for Native Preview & Code Inspector
   saveCheckpointFiles(files: CheckpointFile[]): Promise<void>;
@@ -139,6 +141,7 @@ const fallbackCheckpoints = new Map<string, PrototypeCheckpoint[]>();
 const fallbackPromotions = new Map<string, PrototypePromotion>();
 const fallbackMessages = new Map<string, PrototypeMessage[]>();
 const fallbackCheckpointFiles = new Map<string, CheckpointFile[]>();
+const fallbackWorkspaceMembers = new Map<string, Map<string, WorkspaceRole>>();
 
 fallbackWorkspaces.set(DEFAULT_WORKSPACE_ID, {
   id: DEFAULT_WORKSPACE_ID,
@@ -680,6 +683,45 @@ export class PostgresPrototypeRepository implements PrototypeRepository {
     fallbackWorkspaces.set(id, ws);
     return ws;
   }
+
+
+  async getWorkspaceMembership(userId: string, workspaceId: string): Promise<{ role: string } | null> {
+      try {
+        const r = await this.pool.query(
+          `SELECT role FROM workspace_members WHERE user_id = $1 AND workspace_id = $2`,
+          [userId, workspaceId]
+        );
+        if (r?.rows?.[0]) {
+          return { role: r.rows[0].role as string };
+        }
+      } catch (err: any) {
+        console.warn('[PostgresPrototypeRepository] getWorkspaceMembership error:', err.message);
+      }
+      // Fallback to in-memory store (same pattern as other methods)
+      const workspaceMembers = fallbackWorkspaceMembers.get(workspaceId);
+      if (workspaceMembers?.has(userId)) {
+        return { role: workspaceMembers.get(userId)! };
+      }
+      return null;
+    }
+
+    async addWorkspaceMember(input: { workspaceId: string; userId: string; role: string }): Promise<void> {
+      try {
+        await this.pool.query(
+          `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+          [input.workspaceId, input.userId, input.role]
+        );
+      } catch (err: any) {
+        console.warn('[PostgresPrototypeRepository] addWorkspaceMember error:', err.message);
+      }
+      // Fallback to in-memory store (same pattern as other methods)
+      let workspaceMembers = fallbackWorkspaceMembers.get(input.workspaceId);
+      if (!workspaceMembers) {
+        workspaceMembers = new Map<string, WorkspaceRole>();
+        fallbackWorkspaceMembers.set(input.workspaceId, workspaceMembers);
+      }
+      workspaceMembers.set(input.userId, input.role as WorkspaceRole);
+    }
 
   async getWorkspace(id: string): Promise<Workspace | null> {
     try {

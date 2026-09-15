@@ -354,7 +354,7 @@ export const createPpApp = (
   });
 
   // Workspaces API
-  app.get('/api/workspaces', async (req, res, next) => {
+  app.get('/api/workspaces', authService.requireAuth(), async (req, res, next) => {
     try {
       const user = await authService.verifyToken(req.headers.authorization);
       const workspaces = await protoRepo.listWorkspaces(user?.id);
@@ -380,7 +380,7 @@ export const createPpApp = (
   });
 
   // Projects API
-  app.get('/api/projects', async (req, res, next) => {
+  app.get('/api/projects', authService.requireAuth(), async (req, res, next) => {
     try {
       const workspaceId = (req.query.workspaceId as string) || undefined;
       const projects = await protoRepo.listProjects(workspaceId);
@@ -390,7 +390,7 @@ export const createPpApp = (
     }
   });
 
-  app.get('/api/workspaces/:workspaceId/projects', async (req, res, next) => {
+  app.get('/api/workspaces/:workspaceId/projects', authService.requireAuth(), authService.requireRole('VIEWER'), async (req, res, next) => {
     try {
       const workspaceId = String(req.params.workspaceId);
       const projects = await protoRepo.listProjects(workspaceId);
@@ -400,7 +400,7 @@ export const createPpApp = (
     }
   });
 
-  app.post('/api/workspaces/:workspaceId/projects', async (req, res, next) => {
+  app.post('/api/workspaces/:workspaceId/projects', authService.requireAuth(), authService.requireRole('MEMBER'), async (req, res, next) => {
     try {
       const workspaceId = String(req.params.workspaceId);
       const { name, description, githubRepository, githubBranch } = req.body ?? {};
@@ -418,10 +418,15 @@ export const createPpApp = (
     }
   });
 
-  app.get('/api/projects/:id', async (req, res, next) => {
+  app.get('/api/projects/:id', authService.requireAuth(), async (req, res, next) => {
     try {
       const projectId = String(req.params.id);
       const project = await protoRepo.getProject(projectId);
+      if (!project) return res.status(404).json({ error: 'Project not found' });
+      const wsRole = await authService.authorizeProject(req.user?.id ?? '', projectId);
+      if (!wsRole) return res.status(403).json({ error: 'Forbidden' });
+      const wsRoleStr = String(wsRole);
+      if (wsRoleStr !== 'OWNER' && wsRoleStr !== 'ADMIN' && wsRoleStr !== 'MEMBER' && wsRoleStr !== 'VIEWER') return res.status(403).json({ error: 'Forbidden' });
       if (!project) return res.status(404).json({ error: 'Project not found' });
       const allSessions = await protoRepo.listSessions();
       const projectSessions = allSessions.filter(s => s.projectId === project.id || s.project === project.name);
@@ -431,9 +436,13 @@ export const createPpApp = (
     }
   });
 
-  app.patch('/api/projects/:id', async (req, res, next) => {
+  app.patch('/api/projects/:id', authService.requireAuth(), async (req, res, next) => {
     try {
       const projectId = String(req.params.id);
+      const project = await protoRepo.getProject(projectId);
+      if (!project) return res.status(404).json({ error: 'Project not found' });
+      const wsRole = await authService.authorizeProject(req.user?.id ?? '', projectId);
+      if (!wsRole || (wsRole !== 'OWNER' && wsRole !== 'ADMIN' && wsRole !== 'MEMBER')) return res.status(403).json({ error: 'Forbidden' });
       const { name, description, status, githubRepository, githubBranch } = req.body ?? {};
       const updated = await protoRepo.updateProject(projectId, {
         name,
@@ -449,11 +458,13 @@ export const createPpApp = (
     }
   });
 
-  app.delete('/api/projects/:id', async (req, res, next) => {
+  app.delete('/api/projects/:id', authService.requireAuth(), async (req, res, next) => {
     try {
       const projectId = String(req.params.id);
       const project = await protoRepo.getProject(projectId);
       if (!project) return res.status(404).json({ error: 'Project not found' });
+      const wsRole = await authService.authorizeProject(req.user?.id ?? '', projectId);
+      if (!wsRole || wsRole !== 'OWNER') return res.status(403).json({ error: 'Forbidden: Requires OWNER' });
       // Delete project - relational CASCADE deletes associated sessions, tasks, checkpoints, files
       // Explicitly: remote GitHub repository is NEVER touched.
       const ok = await protoRepo.deleteProject(projectId);
