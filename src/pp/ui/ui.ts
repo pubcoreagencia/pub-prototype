@@ -878,6 +878,28 @@ const STEP_LABELS = {
 function $(id){ return document.getElementById(id); }
 function $$(sel){ return document.querySelectorAll(sel); }
 
+function getAuthToken() {
+  const token = localStorage.getItem('pub-prototype:token');
+  if (token) return token;
+  // Allow test-token only in non‑production environments, safely checking for process availability
+  if (typeof process !== 'undefined' && (process.env.NODE_ENV === 'test' || process.env.NODE_ENV === 'development')) {
+    return 'test-token';
+  }
+  return undefined;
+}
+
+
+function apiFetch(url, opts = {}) {
+  const headers = new Headers(opts.headers || {});
+  const token = getAuthToken();
+  if (token && !headers.has('Authorization') && !headers.has('authorization')) {
+    headers.set('Authorization', 'Bearer ' + token);
+  }
+  return fetch(url, { ...opts, headers });
+}
+
+globalThis.apiFetch = apiFetch;
+
 function clearStaleErrors() {
   document.querySelectorAll('.error-card').forEach(el => el.remove());
 }
@@ -986,7 +1008,7 @@ async function loadFilesInspector(sid) {
   if (!treeList) return;
   treeList.innerHTML = '<div style="padding:10px;font-size:11px;color:var(--text-tertiary)">Carregando arquivos...</div>';
   try {
-    const r = await fetch('/prototype/sessions/' + encodeURIComponent(sid) + '/files');
+    const r = await apiFetch('/prototype/sessions/' + encodeURIComponent(sid) + '/files');
     if (!r.ok) throw new Error('Falha ao carregar lista de arquivos');
     const data = await r.json();
     const files = data.files || [];
@@ -1020,7 +1042,7 @@ async function viewFile(sid, filePath) {
   pathLabel.textContent = filePath;
   content.textContent = '// Carregando ' + filePath + '...';
   try {
-    const r = await fetch('/prototype/sessions/' + encodeURIComponent(sid) + '/files/' + encodeURIComponent(filePath));
+    const r = await apiFetch('/prototype/sessions/' + encodeURIComponent(sid) + '/files/' + encodeURIComponent(filePath));
     if (!r.ok) throw new Error('Arquivo não encontrado');
     const file = await r.json();
     content.textContent = file.content;
@@ -1044,7 +1066,7 @@ async function confirmDeleteProject() {
   const p = pendingDeleteProject;
   closeDeleteModal();
   try {
-    const r = await fetch('/api/projects/' + encodeURIComponent(p.id), { method: 'DELETE' });
+    const r = await apiFetch('/api/projects/' + encodeURIComponent(p.id), { method: 'DELETE' });
     const local = getLocalProjects().filter(item => item.id !== p.id);
     localStorage.setItem(LOCAL_PROJECTS_KEY, JSON.stringify(local));
     projectsCache = projectsCache.filter(item => item.id !== p.id);
@@ -1077,7 +1099,7 @@ async function confirmRenameProject() {
   if (!newName || !sessionId) return;
   closeRenameModal();
   try {
-    await fetch('/api/projects/' + encodeURIComponent(sessionId), {
+    await apiFetch('/api/projects/' + encodeURIComponent(sessionId), {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: newName })
@@ -1178,7 +1200,7 @@ async function triggerPreviewRecovery() {
   if (!sessionId) return;
   setPreviewState('recovering');
   try {
-    const r = await fetch('/prototype/sessions/' + encodeURIComponent(sessionId) + '/preview/refresh', { method: 'POST' });
+    const r = await apiFetch('/prototype/sessions/' + encodeURIComponent(sessionId) + '/preview/refresh', { method: 'POST' });
     const data = await r.json().catch(() => ({}));
     const newUrl = data.previewUrl || '/prototype/sessions/' + encodeURIComponent(sessionId) + '/preview/';
     renderPreview(newUrl);
@@ -1208,11 +1230,11 @@ function saveLocalProject(session) {
 async function loadProjects() {
   try {
     let data = [];
-    const r = await fetch('/prototype/sessions').catch(() => null);
+    const r = await apiFetch('/prototype/sessions').catch(() => null);
     if (r && r.ok) {
       data = await r.json().catch(() => []);
     } else {
-      const r2 = await fetch('/api/projects').catch(() => null);
+      const r2 = await apiFetch('/api/projects').catch(() => null);
       if (r2 && r2.ok) data = await r2.json().catch(() => []);
     }
 
@@ -1285,8 +1307,11 @@ function renderProjects() {
   });
 }
 
-async function selectProject(id) {
-  if (!id) return;
+function selectProject(id) {
+  openProject(id);
+}
+
+async function openProject(id) {
   try {
     await loadSession(id);
   } catch (e) {
@@ -1309,7 +1334,7 @@ async function confirmNewProject() {
   if (!name) return;
   hideNewProjectModal();
   try {
-    const r = await fetch('/prototype/sessions', {
+    const r = await apiFetch('/prototype/sessions', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ project: name })
@@ -1346,7 +1371,7 @@ async function loadSession(id) {
   const proj = projectsCache.find(p => p.id === id) || getLocalProjects().find(p => p.id === id);
   let data = null;
   try {
-    const r = await fetch('/prototype/sessions/' + encodeURIComponent(id));
+    const r = await apiFetch('/prototype/sessions/' + encodeURIComponent(id));
     if (r.ok) data = await r.json();
   } catch {}
 
@@ -1599,7 +1624,7 @@ function startLivePoll(sid) {
       return;
     }
     try {
-      const r = await fetch('/prototype/sessions/' + encodeURIComponent(sid));
+      const r = await apiFetch('/prototype/sessions/' + encodeURIComponent(sid));
       if (!r.ok) return;
       const data = await r.json();
       const currentTask = (data.tasks || []).find(t => t.id === currentTaskId);
@@ -1657,7 +1682,7 @@ async function sendPrompt() {
   startTaskTimer();
 
   try {
-    const r = await fetch('/prototype/sessions/' + encodeURIComponent(sessionId) + '/prompts', {
+    const r = await apiFetch('/prototype/sessions/' + encodeURIComponent(sessionId) + '/prompts', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ prompt })

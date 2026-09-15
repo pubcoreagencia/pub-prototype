@@ -203,7 +203,7 @@ describe('HttpPdlTaskIngestionPort', () => {
       const req = {
         method: 'POST',
         url: '/prototype/sessions/sess-123/promote',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', authorization: 'Bearer test-token' },
         body: {},
         params: { id: 'sess-123' },
       };
@@ -230,7 +230,7 @@ describe('HttpPdlTaskIngestionPort', () => {
       const route = router.stack.find((layer: any) => layer.route?.path === '/prototype/sessions/:id/promote')?.route;
       expect(route).toBeDefined();
 
-      const handler = route.stack[0].handle;
+      const handler = route.stack[route.stack.length - 1].handle;
       await handler(req, res, (err: any) => { if (err) throw err; });
 
       expect(responseStatus).toBe(503);

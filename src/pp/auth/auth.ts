@@ -66,6 +66,11 @@ export class AuthService {
     const cleanToken = token.startsWith('Bearer ') || token.startsWith('bearer ') ? token.slice(7).trim() : token.trim();
     if (!cleanToken) return null;
 
+    // Reject test/mock shortcuts in production
+    if (process.env.NODE_ENV === 'production' && (cleanToken === 'test-token' || cleanToken === 'sovereign-token' || cleanToken.startsWith('mock-') || cleanToken === 'user-b-id' || cleanToken === 'viewer-user-id')) {
+      return null;
+    }
+
     if (cleanToken === 'test-token' || cleanToken === 'sovereign-token' || cleanToken.startsWith('mock-') || cleanToken === 'user-b-id' || cleanToken === 'viewer-user-id') {
       return {
         ...this.defaultUser,
@@ -190,10 +195,42 @@ export class AuthService {
         return next();
       }
 
-      const userRole = await this.getUserWorkspaceRole(user.id, workspaceId);
+      const userRole = await this.authorizeWorkspace(user.id, workspaceId);
       if (!userRole || ROLE_HIERARCHY[userRole] < ROLE_HIERARCHY[minRole]) {
         return res.status(403).json({
           error: `Forbidden: Requires ${minRole} permission, but current role is ${userRole || 'NONE'}`,
+        });
+      }
+
+      req.user.role = userRole;
+      return next();
+    };
+  };
+
+  requireSessionRole = (minRole: WorkspaceRole = 'VIEWER') => {
+    return async (req: Request, res: Response, next: NextFunction) => {
+      const authHeader = (req.headers.authorization || req.headers['x-auth-token']) as string | string[] | undefined;
+      const token = Array.isArray(authHeader) ? authHeader[0] : authHeader;
+      const user = req.user ?? (await this.verifyToken(token));
+      if (!user) {
+        return res.status(401).json({ error: 'Unauthorized: Invalid or expired authentication token' });
+      }
+      req.user = user;
+
+      const sessionId = String(req.params.id || req.body?.sessionId || req.query.sessionId || '');
+      if (!sessionId) {
+        return res.status(400).json({ error: 'Session ID is required' });
+      }
+
+      const session = await this.protoRepo?.getSession(sessionId);
+      if (!session) {
+        return res.status(404).json({ error: 'Session not found' });
+      }
+
+      const userRole = await this.authorizeSession(user.id, sessionId);
+      if (!userRole || ROLE_HIERARCHY[userRole] < ROLE_HIERARCHY[minRole]) {
+        return res.status(403).json({
+          error: `Forbidden: Requires ${minRole} permission for this session, but current role is ${userRole || 'NONE'}`,
         });
       }
 

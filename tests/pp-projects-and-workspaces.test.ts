@@ -30,8 +30,11 @@ describe('PP 2.0 — Workspaces & Projects Management', () => {
   });
 
   it('lists default workspace and allows creating custom workspaces', async () => {
+    const authHeaders = { Authorization: 'Bearer test-token' };
+    const authJsonHeaders = { 'content-type': 'application/json', Authorization: 'Bearer test-token' };
+
     // 1. List workspaces
-    const listRes = await fetch(`${baseUrl}/api/workspaces`);
+    const listRes = await fetch(`${baseUrl}/api/workspaces`, { headers: authHeaders });
     expect(listRes.status).toBe(200);
     const workspaces = await listRes.json();
     expect(workspaces.length).toBeGreaterThanOrEqual(1);
@@ -40,7 +43,7 @@ describe('PP 2.0 — Workspaces & Projects Management', () => {
     // 2. Create custom workspace
     const createRes = await fetch(`${baseUrl}/api/workspaces`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: authJsonHeaders,
       body: JSON.stringify({ name: 'SAGAZ Enterprise Org' }),
     });
     expect(createRes.status).toBe(201);
@@ -50,14 +53,18 @@ describe('PP 2.0 — Workspaces & Projects Management', () => {
   });
 
   it('creates project inside workspace and retrieves project by ID', async () => {
-    const listRes = await fetch(`${baseUrl}/api/workspaces`);
+    const authHeaders = { Authorization: 'Bearer test-token' };
+    const authJsonHeaders = { 'content-type': 'application/json', Authorization: 'Bearer test-token' };
+
+    const listRes = await fetch(`${baseUrl}/api/workspaces`, { headers: authHeaders });
     const workspaces = await listRes.json();
     const wsId = workspaces[0].id;
 
     // Create project in workspace
-    const createRes = await fetch(`${baseUrl}/api/workspaces/${wsId}/projects`, {
+    const workspaceId = wsId; // use the workspace from earlier test
+    const createRes = await fetch(`${baseUrl}/api/workspaces/${workspaceId}/projects`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: authJsonHeaders,
       body: JSON.stringify({
         name: 'Agro Dashboard AI',
         description: 'Painel inteligente para gestão de safras',
@@ -69,21 +76,28 @@ describe('PP 2.0 — Workspaces & Projects Management', () => {
     expect(project.workspaceId).toBe(wsId);
 
     // Get project by ID
-    const getRes = await fetch(`${baseUrl}/api/projects/${project.id}`);
+    const getRes = await fetch(`${baseUrl}/api/projects/${project.id}`, { headers: authHeaders });
     expect(getRes.status).toBe(200);
     const retrieved = await getRes.json();
     expect(retrieved.name).toBe('Agro Dashboard AI');
   });
 
   it('renames project via PATCH /api/projects/:id', async () => {
+    const authJsonHeaders = { 'content-type': 'application/json', Authorization: 'Bearer test-token' };
+    // Get default workspace id
+    const wsListRes = await fetch(`${baseUrl}/api/workspaces`, { headers: { Authorization: 'Bearer test-token' } });
+    const wsList = await wsListRes.json();
+    const wsId = wsList[0].id;
+    // Add OWNER membership for test-token
+    await protoRepo.addWorkspaceMember({ workspaceId: wsId, userId: 'test-token', role: 'OWNER' });
     const project = await protoRepo.createProject({
       name: 'Old Project Name',
-      workspaceId: '00000000-0000-0000-0000-000000000001',
+      workspaceId: wsId,
     });
 
     const patchRes = await fetch(`${baseUrl}/api/projects/${project.id}`, {
       method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
+      headers: authJsonHeaders,
       body: JSON.stringify({ name: 'Renamed AI System' }),
     });
     expect(patchRes.status).toBe(200);
@@ -95,10 +109,17 @@ describe('PP 2.0 — Workspaces & Projects Management', () => {
   });
 
   it('deletes project with cascading removal of sessions and checkpoints, without deleting GitHub repo', async () => {
+    const authHeaders = { Authorization: 'Bearer test-token' };
+    // Obtain default workspace
+    const wsListRes = await fetch(`${baseUrl}/api/workspaces`, { headers: authHeaders });
+    const wsList = await wsListRes.json();
+    const wsId = wsList[0].id;
+    // Ensure OWNER membership
+    await protoRepo.addWorkspaceMember({ workspaceId: wsId, userId: 'test-token', role: 'OWNER' });
     // 1. Create project
     const project = await protoRepo.createProject({
       name: 'Project to Delete',
-      workspaceId: '00000000-0000-0000-0000-000000000001',
+      workspaceId: wsId,
       githubRepository: 'https://github.com/pubcoreagencia/pub-dev-loop-prototypes.git',
     });
 
@@ -138,6 +159,7 @@ describe('PP 2.0 — Workspaces & Projects Management', () => {
     // 5. Send DELETE request
     const deleteRes = await fetch(`${baseUrl}/api/projects/${project.id}`, {
       method: 'DELETE',
+      headers: authHeaders,
     });
     expect(deleteRes.status).toBe(200);
     const deleteBody = await deleteRes.json();

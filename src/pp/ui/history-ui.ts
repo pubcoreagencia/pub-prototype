@@ -1,3 +1,4 @@
+// apiFetch is provided globally by ui.ts
 export function prototypeHistoryUiScript(): string {
   return `<script>
 (() => {
@@ -21,7 +22,7 @@ export function prototypeHistoryUiScript(): string {
   const currentFrame = modal.querySelector('#pp-compare-current');
   modal.querySelector('#pp-compare-close').addEventListener('click', async () => {
     if (state.comparisonId && state.sessionId) {
-      await fetch('/prototype/sessions/'+encodeURIComponent(state.sessionId)+'/comparison-previews/'+encodeURIComponent(state.comparisonId), { method: 'DELETE' }).catch(() => undefined);
+      await apiFetch('/prototype/sessions/'+encodeURIComponent(state.sessionId)+'/comparison-previews/'+encodeURIComponent(state.comparisonId), { method: 'DELETE' }).catch(() => undefined);
       state.comparisonId = null;
     }
     modal.style.display = 'none';
@@ -37,7 +38,7 @@ export function prototypeHistoryUiScript(): string {
   };
   const sync = async () => {
     if (!state.sessionId) return;
-    const r = await fetch('/prototype/sessions/'+encodeURIComponent(state.sessionId));
+    const r = await apiFetch('/prototype/sessions/'+encodeURIComponent(state.sessionId));
     if (!r.ok) return;
     const data = await r.json(); state.checkpoints = data.checkpoints || []; render();
   };
@@ -46,7 +47,7 @@ export function prototypeHistoryUiScript(): string {
     const idx = sorted.findIndex(x=>x.id===id);
     if (idx < 1) { diff.style.display='block'; diff.textContent='A primeira versão não possui uma versão anterior para comparação.'; return; }
     const from=sorted[idx-1], to=sorted[idx];
-    const r=await fetch('/prototype/sessions/'+encodeURIComponent(state.sessionId)+'/diff?from='+encodeURIComponent(from.id)+'&to='+encodeURIComponent(to.id));
+    const r=await apiFetch('/prototype/sessions/'+encodeURIComponent(state.sessionId)+'/diff?from='+encodeURIComponent(from.id)+'\u0026to='+encodeURIComponent(to.id));
     const data=await r.json(); diff.style.display='block'; diff.textContent=data.diff||'(sem diferenças)';
   };
   const showPreview = async id => {
@@ -54,14 +55,14 @@ export function prototypeHistoryUiScript(): string {
     modal.style.display='block'; compareStatus.textContent='Subindo preview de v'+cp.promptIndex+'…';
     const currentSrc = document.querySelector('iframe[title="PUB Prototype live preview"]')?.src;
     if(currentSrc && currentSrc !== 'about:blank') currentFrame.src = currentSrc;
-    const r=await fetch('/prototype/sessions/'+encodeURIComponent(state.sessionId)+'/comparison-previews',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({checkpointId:id})});
+    const r=await apiFetch('/prototype/sessions/'+encodeURIComponent(state.sessionId)+'/comparison-previews',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({checkpointId:id})});
     if(!r.ok){compareStatus.textContent='Falha ao criar preview comparativo.';return;}
     const data=await r.json(); state.comparisonId=data.id; versionFrame.src=data.info?.url||'about:blank'; compareStatus.textContent='v'+cp.promptIndex+' aberta ao lado da versão atual.';
   };
   const restore = async id => {
     const cp=state.checkpoints.find(x=>x.id===id); if(!cp) return;
     if(!confirm('Restaurar a v'+cp.promptIndex+'? O histórico será preservado e uma nova versão será criada.')) return;
-    const r=await fetch('/prototype/sessions/'+encodeURIComponent(state.sessionId)+'/restore/'+encodeURIComponent(id),{method:'POST'});
+    const r=await apiFetch('/prototype/sessions/'+encodeURIComponent(state.sessionId)+'/restore/'+encodeURIComponent(id),{method:'POST'});
     if(!r.ok){alert('Falha ao restaurar a versão.');return;} await sync();
   };
   list.addEventListener('click',e=>{const p=e.target.closest('[data-preview]');if(p)showPreview(p.dataset.preview);const d=e.target.closest('[data-diff]');if(d)showDiff(d.dataset.diff);const r=e.target.closest('[data-restore]');if(r)restore(r.dataset.restore);});

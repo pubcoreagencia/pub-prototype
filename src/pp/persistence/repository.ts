@@ -141,7 +141,14 @@ const fallbackCheckpoints = new Map<string, PrototypeCheckpoint[]>();
 const fallbackPromotions = new Map<string, PrototypePromotion>();
 const fallbackMessages = new Map<string, PrototypeMessage[]>();
 const fallbackCheckpointFiles = new Map<string, CheckpointFile[]>();
-const fallbackWorkspaceMembers = new Map<string, Map<string, WorkspaceRole>>();
+const fallbackWorkspaceMembers = new Map<string, Map<string, WorkspaceRole>>([
+      [DEFAULT_WORKSPACE_ID,
+        new Map<string, WorkspaceRole>([
+          ['test-user-id', 'OWNER'],
+          ['viewer-user-id', 'VIEWER'],
+        ]),
+      ],
+]);
 
 fallbackWorkspaces.set(DEFAULT_WORKSPACE_ID, {
   id: DEFAULT_WORKSPACE_ID,
@@ -681,6 +688,12 @@ export class PostgresPrototypeRepository implements PrototypeRepository {
       updatedAt: new Date(),
     };
     fallbackWorkspaces.set(id, ws);
+    let workspaceMembers = fallbackWorkspaceMembers.get(id);
+    if (!workspaceMembers) {
+      workspaceMembers = new Map<string, WorkspaceRole>();
+      fallbackWorkspaceMembers.set(id, workspaceMembers);
+    }
+    workspaceMembers.set(ownerId, 'OWNER');
     return ws;
   }
 

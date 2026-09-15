@@ -122,9 +122,10 @@ describe('PP 2.0 — Native Preview & Recovery', () => {
       },
     ]);
 
-    // POST /refresh
+    // POST /refresh with auth
     const refreshRes = await fetch(`${baseUrl}/prototype/sessions/${session.id}/preview/refresh`, {
       method: 'POST',
+      headers: { Authorization: 'Bearer test-token' },
     });
     expect(refreshRes.status).toBe(200);
     const refreshData = await refreshRes.json();
@@ -133,9 +134,10 @@ describe('PP 2.0 — Native Preview & Recovery', () => {
     expect(refreshData.mode).toBe('native');
     expect(refreshData.filesCount).toBe(1);
 
-    // POST /restart
+    // POST /restart with auth
     const restartRes = await fetch(`${baseUrl}/prototype/sessions/${session.id}/preview/restart`, {
       method: 'POST',
+      headers: { Authorization: 'Bearer test-token' },
     });
     expect(restartRes.status).toBe(200);
     const restartData = await restartRes.json();
@@ -179,7 +181,7 @@ describe('PP 2.0 — Native Preview & Recovery', () => {
     ]);
 
     // List files
-    const listRes = await fetch(`${baseUrl}/prototype/sessions/${session.id}/files`);
+    const listRes = await fetch(`${baseUrl}/prototype/sessions/${session.id}/files`, { headers: { Authorization: 'Bearer test-token' } });
     expect(listRes.status).toBe(200);
     const listData = await listRes.json();
     expect(listData.files.length).toBe(2);
@@ -187,7 +189,7 @@ describe('PP 2.0 — Native Preview & Recovery', () => {
     expect(listData.files.map((f: any) => f.path)).toContain('package.json');
 
     // Inspect single file
-    const fileRes = await fetch(`${baseUrl}/prototype/sessions/${session.id}/files/src/main.ts`);
+    const fileRes = await fetch(`${baseUrl}/prototype/sessions/${session.id}/files/src/main.ts`, { headers: { Authorization: 'Bearer test-token' } });
     expect(fileRes.status).toBe(200);
     const fileData = await fileRes.json();
     expect(fileData.path).toBe('src/main.ts');

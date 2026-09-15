@@ -170,7 +170,7 @@ export const createPpApp = (
   // GET /prototype/sessions/:id
   app.get('/prototype/sessions/:id', async (req, res, next) => {
     try {
-      const session = await protoRepo.getSession(req.params.id);
+      const session = await protoRepo.getSession(String(req.params.id));
       if (!session) return res.sendStatus(404);
       const sessionTasks = await taskRepo.list(session.id);
       return res.json({ session, checkpoints: await protoRepo.listCheckpoints(session.id), tasks: sessionTasks });
@@ -264,7 +264,7 @@ export const createPpApp = (
   app.get(['/prototype/sessions/:id/preview', '/prototype/sessions/:id/preview/{*path}'], handlePreviewRequest);
 
   // POST /prototype/sessions/:id/preview/refresh & /restart
-  app.post(['/prototype/sessions/:id/preview/refresh', '/prototype/sessions/:id/preview/restart'], async (req, res, next) => {
+  app.post(['/prototype/sessions/:id/preview/refresh', '/prototype/sessions/:id/preview/restart'], authService.requireSessionRole('MEMBER'), async (req, res, next) => {
     try {
       const sessionId = String(req.params.id);
       const session = await protoRepo.getSession(sessionId);
@@ -308,7 +308,7 @@ export const createPpApp = (
   });
 
   // GET /prototype/sessions/:id/files (List files for inspector)
-  app.get('/prototype/sessions/:id/files', async (req, res, next) => {
+  app.get('/prototype/sessions/:id/files', authService.requireSessionRole('VIEWER'), async (req, res, next) => {
     try {
       const sessionId = String(req.params.id);
       const session = await protoRepo.getSession(sessionId);
@@ -331,7 +331,7 @@ export const createPpApp = (
   });
 
   // GET /prototype/sessions/:id/files/* (Inspect single file content)
-  app.get('/prototype/sessions/:id/files/{*path}', async (req, res, next) => {
+  app.get('/prototype/sessions/:id/files/{*path}', authService.requireSessionRole('VIEWER'), async (req, res, next) => {
     try {
       const sessionId = String(req.params.id);
       const rawPath = (req.params as any).path ?? (req.params as any)[0];
@@ -427,7 +427,6 @@ export const createPpApp = (
       if (!wsRole) return res.status(403).json({ error: 'Forbidden' });
       const wsRoleStr = String(wsRole);
       if (wsRoleStr !== 'OWNER' && wsRoleStr !== 'ADMIN' && wsRoleStr !== 'MEMBER' && wsRoleStr !== 'VIEWER') return res.status(403).json({ error: 'Forbidden' });
-      if (!project) return res.status(404).json({ error: 'Project not found' });
       const allSessions = await protoRepo.listSessions();
       const projectSessions = allSessions.filter(s => s.projectId === project.id || s.project === project.name);
       return res.json({ ...project, sessions: projectSessions });
@@ -481,9 +480,18 @@ export const createPpApp = (
   });
 
   app.post('/api/auth/login', async (req, res) => {
+    const providedToken = req.body?.token;
+    // In production, disallow fallback test-token usage
+    if (!providedToken && process.env.NODE_ENV === 'production') {
+      return res.status(403).json({ error: 'Login not available in production' });
+    }
+    const token = providedToken || 'test-token';
+    const user = await authService.verifyToken(token);
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid authentication token' });
+    }
     const email = req.body?.email || 'default@pubprototype.internal';
-    const user = await authService.verifyToken(req.body?.token || 'test-token');
-    return res.json({ token: 'test-token', user: { ...user, email } });
+    return res.json({ token, user: { ...user, email } });
   });
 
   app.post('/api/auth/logout', async (_req, res) => {
@@ -493,7 +501,7 @@ export const createPpApp = (
   // GET /prototype/sessions/:id/events (SSE)
   app.get('/prototype/sessions/:id/events', async (req, res, next) => {
     try {
-      const session = await protoRepo.getSession(req.params.id);
+      const session = await protoRepo.getSession(String(req.params.id));
       if (!session) return res.sendStatus(404);
       res.status(200);
       res.setHeader('Content-Type', 'text/event-stream');
@@ -513,11 +521,15 @@ export const createPpApp = (
   });
 
   // PATCH /prototype/sessions/:id
-  app.patch('/prototype/sessions/:id', async (req, res, next) => {
+  app.patch('/prototype/sessions/:id', authService.requireSessionRole('MEMBER'), async (req, res, next) => {
     try {
       const allowed = ['status', 'mode', 'previewUrl', 'previewRuntime', 'workspacePath', 'lastCheckpointSha'] as const;
-      const patch = Object.fromEntries(allowed.filter(k => req.body?.[k] !== undefined).map(k => [k, req.body[k]]));
-      const session = await protoRepo.updateSession(req.params.id, patch);
+      const patch = Object.fromEntries(
+        allowed
+          .filter(k => (req.body as any)[k] !== undefined)
+          .map(k => [k, (req.body as any)[k]])
+      );
+      const session = await protoRepo.updateSession(String(req.params.id), patch);
       if (!session) return res.sendStatus(404);
       const eventType = patch.status === 'READY' ? 'PREVIEW_READY' : patch.status === 'FAILED' ? 'ERROR' : null;
       if (eventType) prototypeEvents.emit({ sessionId: session.id, type: eventType, payload: { status: session.status, previewUrl: session.previewUrl } });
@@ -528,7 +540,7 @@ export const createPpApp = (
   });
 
   // POST /prototype/sessions/:id/prompts
-  app.post('/prototype/sessions/:id/prompts', sessionRateLimiter, async (req, res, next) => {
+  app.post('/prototype/sessions/:id/prompts', authService.requireSessionRole('MEMBER'), sessionRateLimiter, async (req, res, next) => {
     try {
       const session = await protoRepo.getSession(String(req.params.id));
       if (!session) return res.sendStatus(404);
@@ -555,9 +567,9 @@ export const createPpApp = (
   });
 
   // GET /prototype/sessions/:id/diff
-  app.get('/prototype/sessions/:id/diff', async (req, res, next) => {
+  app.get('/prototype/sessions/:id/diff', authService.requireSessionRole('VIEWER'), async (req, res, next) => {
     try {
-      const session = await protoRepo.getSession(req.params.id);
+      const session = await protoRepo.getSession(String(req.params.id));
       if (!session) return res.sendStatus(404);
       const checkpoints = await protoRepo.listCheckpoints(session.id);
       const fromId = String(req.query.from ?? '');
@@ -574,9 +586,9 @@ export const createPpApp = (
   });
 
   // POST /prototype/sessions/:id/comparison-previews
-  app.post('/prototype/sessions/:id/comparison-previews', async (req, res, next) => {
+  app.post('/prototype/sessions/:id/comparison-previews', authService.requireSessionRole('MEMBER'), async (req, res, next) => {
     try {
-      const session = await protoRepo.getSession(req.params.id);
+      const session = await protoRepo.getSession(String(req.params.id));
       if (!session) return res.sendStatus(404);
       const checkpointId = String(req.body?.checkpointId ?? '');
       const checkpoint = (await protoRepo.listCheckpoints(session.id)).find(c => c.id === checkpointId);
@@ -599,10 +611,10 @@ export const createPpApp = (
   });
 
   // GET /prototype/sessions/:id/comparison-previews/:previewId
-  app.get('/prototype/sessions/:id/comparison-previews/:previewId', async (req, res, next) => {
+  app.get('/prototype/sessions/:id/comparison-previews/:previewId', authService.requireSessionRole('VIEWER'), async (req, res, next) => {
     try {
-      const comparison = await comparisonPreviews.get(req.params.previewId);
-      if (!comparison || comparison.sessionId !== req.params.id) return res.sendStatus(404);
+      const comparison = await comparisonPreviews.get(String(req.params.previewId));
+      if (!comparison || comparison.sessionId !== String(req.params.id)) return res.sendStatus(404);
       return res.json(comparison);
     } catch (e) {
       return next(e);
@@ -610,11 +622,11 @@ export const createPpApp = (
   });
 
   // DELETE /prototype/sessions/:id/comparison-previews/:previewId
-  app.delete('/prototype/sessions/:id/comparison-previews/:previewId', async (req, res, next) => {
+  app.delete('/prototype/sessions/:id/comparison-previews/:previewId', authService.requireSessionRole('MEMBER'), async (req, res, next) => {
     try {
-      const session = await protoRepo.getSession(req.params.id);
+      const session = await protoRepo.getSession(String(req.params.id));
       if (!session) return res.sendStatus(404);
-      const comparison = await comparisonPreviews.get(req.params.previewId);
+      const comparison = await comparisonPreviews.get(String(req.params.previewId));
       if (!comparison || comparison.sessionId !== session.id) return res.sendStatus(404);
       await comparisonPreviews.destroy(comparison.id, session.workspacePath ?? repoPath(session.id));
       return res.sendStatus(204);
@@ -624,9 +636,9 @@ export const createPpApp = (
   });
 
   // POST /prototype/sessions/:id/checkpoints
-  app.post('/prototype/sessions/:id/checkpoints', async (req, res, next) => {
+  app.post('/prototype/sessions/:id/checkpoints', authService.requireSessionRole('MEMBER'), async (req, res, next) => {
     try {
-      const session = await protoRepo.getSession(req.params.id);
+      const session = await protoRepo.getSession(String(req.params.id));
       if (!session) return res.sendStatus(404);
       const { promptIndex, prompt, commitSha, previewUrl, buildPassed } = req.body ?? {};
       if (!Number.isInteger(promptIndex) || promptIndex < 1 || typeof prompt !== 'string') return res.status(400).json({ error: 'promptIndex and prompt are required' });
@@ -641,10 +653,10 @@ export const createPpApp = (
   });
 
   // POST /prototype/sessions/:id/promote
-  app.post('/prototype/sessions/:id/promote', async (req, res, next) => {
+  app.post('/prototype/sessions/:id/promote', authService.requireSessionRole('MEMBER'), async (req, res, next) => {
     try {
       const input: PrototypeHandoffInput = {
-        sessionId: req.params.id,
+        sessionId: String(req.params.id),
         objective: req.body?.objective,
         prompt: req.body?.prompt,
         priority: req.body?.priority,
