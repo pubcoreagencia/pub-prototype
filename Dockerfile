@@ -1,5 +1,5 @@
 # Stage 1: Build
-FROM node:20-bookworm-slim AS builder
+FROM node:22-bookworm-slim AS builder
 
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -10,7 +10,7 @@ COPY src/ ./src/
 RUN npm run build
 
 # Stage 2: Production
-FROM node:20-bookworm-slim AS production
+FROM node:22-bookworm-slim AS production
 
 # Install runtime dependencies (git, wget, ca-certificates, dumb-init)
 RUN apt-get update && apt-get install -y --no-install-recommends \
