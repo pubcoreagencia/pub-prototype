@@ -1633,11 +1633,17 @@ export class PostgresPrototypeRepository implements PrototypeRepository {
           token_hash TEXT NOT NULL,
           expires_at TIMESTAMPTZ NOT NULL,
           used_at TIMESTAMPTZ,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          status TEXT NOT NULL DEFAULT 'PENDING'
         );
+
+        ALTER TABLE account_claim_tokens ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'PENDING';
 
         CREATE INDEX IF NOT EXISTS account_claim_tokens_hash_idx ON account_claim_tokens(token_hash);
         CREATE INDEX IF NOT EXISTS account_claim_tokens_user_idx ON account_claim_tokens(user_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS account_claim_tokens_one_active_per_user_idx
+          ON account_claim_tokens(user_id)
+          WHERE used_at IS NULL AND status = 'PENDING';
       `);
       console.log('[PostgresPrototypeRepository] Schema initialized successfully');
     } catch (err: any) {
