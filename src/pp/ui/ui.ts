@@ -878,9 +878,32 @@ const STEP_LABELS = {
 function $(id){ return document.getElementById(id); }
 function $$(sel){ return document.querySelectorAll(sel); }
 
+const HOST_ORIGIN = 'https://pubcore.site';
+const HOST_LOGIN_URL = 'https://pubcore.site/login';
+let activeRefreshPromise = null;
+
 function getAuthToken() {
   const token = localStorage.getItem('pub-prototype:token');
   if (token) return token;
+
+  // Fallback: Se executando sob o mesmo domínio/localStorage do Host, ler a chave de sessão Supabase
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && (key.startsWith('sb-') && key.endsWith('-auth-token') || key === 'supabase.auth.token')) {
+        const raw = localStorage.getItem(key);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          const candidate = parsed?.access_token || parsed?.currentSession?.access_token;
+          if (typeof candidate === 'string' && candidate) {
+            localStorage.setItem('pub-prototype:token', candidate);
+            return candidate;
+          }
+        }
+      }
+    }
+  } catch {}
+
   // Allow test-token only in non‑production environments, safely checking for process availability
   if (typeof process !== 'undefined' && (process.env.NODE_ENV === 'test' || process.env.NODE_ENV === 'development')) {
     return 'test-token';
@@ -888,14 +911,100 @@ function getAuthToken() {
   return undefined;
 }
 
+// Escuta atualizações de token enviadas pelo Host (via postMessage) com validação de origin
+if (typeof window !== 'undefined') {
+  window.addEventListener('message', (event) => {
+    const isAllowedOrigin = event.origin === HOST_ORIGIN || (Boolean(window.location?.origin) && event.origin === window.location.origin);
+    if (!isAllowedOrigin) return;
+    const data = event.data;
+    if (data && data.type === 'PUB_AUTH_TOKEN_UPDATE' && typeof data.token === 'string' && data.token.trim()) {
+      localStorage.setItem('pub-prototype:token', data.token.trim());
+      // Notifica listeners locais
+      window.dispatchEvent(new CustomEvent('pp:token-updated', { detail: { token: data.token.trim() } }));
+    }
+  });
+}
 
-function apiFetch(url, opts = {}) {
+function showSessionExpiredUi() {
+  const chat = $('chat');
+  if (chat) {
+    const existing = document.getElementById('ppSessionExpiredBanner');
+    if (!existing) {
+      const banner = document.createElement('div');
+      banner.id = 'ppSessionExpiredBanner';
+      banner.style.cssText = 'margin:12px;padding:16px;background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.4);border-radius:10px;text-align:center;color:#fafafa;';
+      banner.innerHTML = '<div style="font-weight:700;font-size:14px;color:#ef4444;margin-bottom:6px">Sessão Expirada</div>' +
+        '<div style="font-size:12px;color:#a1a1aa;margin-bottom:12px;line-height:1.5">Sua sessão no PUB Core expirou. Faça login novamente para continuar.</div>' +
+        '<a href="' + HOST_LOGIN_URL + '" target="_top" style="display:inline-block;padding:7px 16px;background:#ef4444;color:#fff;font-size:12px;font-weight:600;border-radius:6px;text-decoration:none">Entrar novamente</a>';
+      chat.appendChild(banner);
+      chat.scrollTop = chat.scrollHeight;
+    }
+  }
+  const composeStatus = $('composeStatus');
+  if (composeStatus) composeStatus.textContent = 'Sessão expirada. Autentique-se novamente.';
+}
+
+async function requestTokenRefreshFromHost(oldToken) {
+  if (activeRefreshPromise) return activeRefreshPromise;
+
+  activeRefreshPromise = (async () => {
+    // 1. Verifica se o token no storage já foi renovado
+    const current = getAuthToken();
+    if (current && current !== oldToken) {
+      return current;
+    }
+
+    // 2. Solicita renovação ao Host via postMessage seguro
+    if (typeof window !== 'undefined') {
+      try {
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({ type: 'PUB_AUTH_REFRESH_REQUEST' }, HOST_ORIGIN);
+        } else if (window.opener) {
+          window.opener.postMessage({ type: 'PUB_AUTH_REFRESH_REQUEST' }, HOST_ORIGIN);
+        }
+      } catch {}
+    }
+
+    // 3. Aguarda janela de até 2000ms para receber PUB_AUTH_TOKEN_UPDATE ou storage update
+    const timeoutMs = 2000;
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      await new Promise(r => setTimeout(r, 200));
+      const updated = getAuthToken();
+      if (updated && updated !== oldToken) {
+        return updated;
+      }
+    }
+    return null;
+  })().finally(() => {
+    activeRefreshPromise = null;
+  });
+
+  return activeRefreshPromise;
+}
+
+async function apiFetch(url, opts = {}, isRetry = false) {
   const headers = new Headers(opts.headers || {});
   const token = getAuthToken();
   if (token && !headers.has('Authorization') && !headers.has('authorization')) {
     headers.set('Authorization', 'Bearer ' + token);
   }
-  return fetch(url, { ...opts, headers });
+
+  const response = await fetch(url, { ...opts, headers });
+
+  // Tratamento de 401 com no máximo 1 retry
+  if (response.status === 401 && !isRetry) {
+    const refreshedToken = await requestTokenRefreshFromHost(token);
+    if (refreshedToken && refreshedToken !== token) {
+      const retryHeaders = new Headers(opts.headers || {});
+      retryHeaders.set('Authorization', 'Bearer ' + refreshedToken);
+      return apiFetch(url, { ...opts, headers: retryHeaders }, true);
+    }
+    // Falha persistente: notifica UI
+    showSessionExpiredUi();
+  }
+
+  return response;
 }
 
 globalThis.apiFetch = apiFetch;
