@@ -6,6 +6,7 @@ import { SovereignAuthProvider } from './sovereign-provider.js';
 import { hashPassword, verifyPassword } from './sovereign/password.js';
 import type { PostgresPrototypeRepository } from '../persistence/repository.js';
 import type { KeyManager } from './sovereign/key-manager.js';
+import { isAllowedOrigin } from '../config/origins.js';
 
 export const REFRESH_COOKIE_NAME = 'pp_refresh_token';
 export const REFRESH_COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -83,6 +84,12 @@ export function createSovereignAuthRouter(options: CreateAuthRouterOptions): Rou
   const pool = options.pool;
 
   // Rate Limiting for security-sensitive endpoints
+  // ARCHITECTURAL NOTE:
+  // express-rate-limit uses an in-memory store by default.
+  // KNOWN LIMITATION: SINGLE-INSTANCE RATE LIMIT STORE
+  // In single-container deployments (current Railway deployment), this provides effective protection.
+  // When scaling horizontally across multiple replicas, migrate to a distributed store (e.g. Redis / rate-limit-redis)
+  // to coordinate rate limit quotas across instances.
   const loginLimiter = rateLimit({
     windowMs: 60 * 1000, // 1 minute
     max: 5, // 5 requests per minute
@@ -234,8 +241,18 @@ export function createSovereignAuthRouter(options: CreateAuthRouterOptions): Rou
     }
   });
 
+  // Origin validation middleware (defensive depth against CSRF)
+  function validateOrigin(req: Request, res: Response, next: any) {
+    const origin = req.headers.origin;
+    // When origin header is present, it MUST belong to the allowed origins
+    if (origin && !isAllowedOrigin(origin)) {
+      return res.status(403).json({ error: 'FORBIDDEN' });
+    }
+    next();
+  }
+
   // 3. POST /prototype/auth/refresh
-  router.post('/refresh', refreshLimiter, async (req: Request, res: Response) => {
+  router.post('/refresh', refreshLimiter, validateOrigin, async (req: Request, res: Response) => {
     try {
       // Refresh token MUST come from HttpOnly cookie
       const cookieHeader = req.headers.cookie;
@@ -288,7 +305,7 @@ export function createSovereignAuthRouter(options: CreateAuthRouterOptions): Rou
   });
 
   // 4. POST /prototype/auth/logout
-  router.post('/logout', async (req: Request, res: Response) => {
+  router.post('/logout', validateOrigin, async (req: Request, res: Response) => {
     try {
       const cookieHeader = req.headers.cookie;
       const refreshToken = extractRefreshTokenFromCookie(cookieHeader);
@@ -380,6 +397,97 @@ export function createSovereignAuthRouter(options: CreateAuthRouterOptions): Rou
     const jwks = keyManager.getJWKS();
     res.setHeader('Cache-Control', 'public, max-age=3600, stale-while-revalidate=86400');
     return res.json(jwks);
+  });
+
+  // 7. POST /prototype/auth/workspaces (Phase 4: Sovereign Workspace Onboarding)
+  router.post('/workspaces', async (req: Request, res: Response) => {
+    try {
+      const authHeader = (req.headers.authorization || req.headers['x-auth-token']) as string | undefined;
+      if (!authHeader) {
+        return res.status(401).json({ error: 'UNAUTHORIZED' });
+      }
+
+      const cleanToken = authHeader.startsWith('Bearer ') || authHeader.startsWith('bearer ')
+        ? authHeader.slice(7).trim()
+        : authHeader.trim();
+
+      const authUser = await provider.verifyAccessToken(cleanToken);
+      if (!authUser) {
+        return res.status(401).json({ error: 'UNAUTHORIZED' });
+      }
+
+      const { name, slug } = req.body ?? {};
+      if (!name || typeof name !== 'string' || !name.trim()) {
+        return res.status(400).json({ error: 'INVALID_REQUEST', message: 'Workspace name is required' });
+      }
+
+      const cleanName = name.trim().slice(0, 100);
+      const generatedSlug = (typeof slug === 'string' && slug.trim())
+        ? slug.trim().toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
+        : cleanName.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || `ws-${Date.now()}`;
+
+      if (options.protoRepo) {
+        const created = await options.protoRepo.createWorkspace({
+          name: cleanName,
+          slug: generatedSlug,
+          ownerId: authUser.id,
+        });
+        return res.status(201).json({
+          id: created.id,
+          name: created.name,
+          slug: created.slug,
+          role: 'OWNER',
+          createdAt: created.createdAt,
+        });
+      }
+
+      // Direct SQL atomic transaction fallback when protoRepo is not injected directly
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+
+        // Check slug uniqueness
+        const existingSlug = await client.query('SELECT id FROM workspaces WHERE slug = $1', [generatedSlug]);
+        if (existingSlug.rows.length > 0) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({ error: 'SLUG_EXISTS', message: 'Workspace slug already exists' });
+        }
+
+        const wsRes = await client.query(
+          `INSERT INTO workspaces (id, name, slug, owner_id, created_at, updated_at)
+           VALUES (gen_random_uuid(), $1, $2, $3, now(), now())
+           RETURNING id, name, slug, owner_id, created_at, updated_at`,
+          [cleanName, generatedSlug, authUser.id]
+        );
+        const ws = wsRes.rows[0];
+
+        await client.query(
+          `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+           VALUES ($1, $2, 'OWNER', now())
+           ON CONFLICT DO NOTHING`,
+          [ws.id, authUser.id]
+        );
+
+        await client.query('COMMIT');
+        return res.status(201).json({
+          id: ws.id,
+          name: ws.name,
+          slug: ws.slug,
+          role: 'OWNER',
+          createdAt: ws.created_at,
+        });
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      if (err.code === '23505') { // Postgres unique_violation
+        return res.status(409).json({ error: 'SLUG_EXISTS' });
+      }
+      return res.status(500).json({ error: 'INTERNAL_ERROR' });
+    }
   });
 
   return router;

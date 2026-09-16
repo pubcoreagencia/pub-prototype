@@ -24,6 +24,7 @@ import { AuthService } from '../auth/auth.js';
 import { VerificationGate } from '../verification/verification-gate.js';
 import { createSovereignAuthRouter } from '../auth/http.js';
 import { getAuthProvider } from '../auth/factory.js';
+import { ALLOWED_ORIGINS, isAllowedOrigin } from '../config/origins.js';
 
 export const createPpApp = (
   pool?: Pool,
@@ -91,16 +92,9 @@ export const createPpApp = (
   });
 
   // CORS middleware for authorized origins (https://pubcore.site and local dev)
-  const allowedOrigins = new Set([
-    'https://pubcore.site',
-    'http://localhost:3000',
-    'http://localhost:3001',
-    'http://localhost:5173',
-  ]);
-
   app.use((req, res, next) => {
     const origin = req.headers.origin;
-    if (origin && allowedOrigins.has(origin)) {
+    if (origin && isAllowedOrigin(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.setHeader('Vary', 'Origin');
@@ -110,7 +104,7 @@ export const createPpApp = (
     }
 
     if (req.method === 'OPTIONS') {
-      if (origin && allowedOrigins.has(origin)) {
+      if (origin && isAllowedOrigin(origin)) {
         return res.sendStatus(204);
       }
       return res.sendStatus(403);
