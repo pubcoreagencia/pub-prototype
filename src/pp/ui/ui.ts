@@ -1415,12 +1415,26 @@ async function loadSession(id) {
   }
 
   $('chatHeaderStatus').textContent = data.session.status === 'READY' ? 'Pronto' : data.session.status;
-  $('chatHeaderMeta').querySelector('.dot').style.background = data.session.status === 'FAILED' ? 'var(--danger)' : 'var(--success)';
+  $('chatHeaderMeta').querySelector('.dot').style.background = data.session.status === 'FAILED' ? 'var(--danger)' : (data.session.status === 'READY' ? 'var(--success)' : 'var(--warning)');
   renderProjects();
 
-  // Load native preview
+  // Load preview or set error state based on session status
   const nativePreviewUrl = '/prototype/sessions/' + encodeURIComponent(sessionId) + '/preview/';
-  renderPreview(nativePreviewUrl);
+  if (data.session.status === 'FAILED') {
+    showPreviewError({
+      title: 'Compilação com falha',
+      desc: 'A geração deste protótipo falhou. Envie uma nova instrução pelo chat para tentar novamente.',
+    });
+  } else if (data.session.status === 'VERIFYING') {
+    setPreviewState('loading');
+    $('previewStatusLabel').textContent = 'Verificando integridade (V0..V5)...';
+    renderPreview(nativePreviewUrl);
+  } else if (data.session.status === 'READY') {
+    renderPreview(nativePreviewUrl);
+  } else {
+    setPreviewState('loading');
+    renderPreview(nativePreviewUrl);
+  }
 
   const activeTask = (data.tasks || []).find(t => ['QUEUED','ASSIGNED','RUNNING','TESTING'].includes(t.status));
   if (activeTask) {
@@ -1570,6 +1584,26 @@ function connectSse(sid) {
   source.addEventListener('BUILD_PASSED', () => {
     updateTimelineStep('BUILD_STARTED', 'done');
     updateTimelineStep('PREVIEW_STARTED', 'active');
+  });
+
+  source.addEventListener('VERIFICATION_STARTED', () => {
+    $('chatHeaderStatus').textContent = 'Verificando';
+    $('chatHeaderMeta').querySelector('.dot').style.background = 'var(--warning)';
+    $('previewStatusLabel').textContent = 'Verificando integridade (V0..V5)...';
+  });
+
+  source.addEventListener('VERIFICATION_PASSED', () => {
+    $('previewStatusLabel').textContent = 'Verificação aprovada. Promovendo...';
+  });
+
+  source.addEventListener('VERIFICATION_FAILED', e => {
+    try {
+      const data = JSON.parse(e.data);
+      showPreviewError({
+        title: 'Verificação reprovada',
+        desc: data.errorSummary || 'O protótipo não passou nos testes de validação obrigatória.',
+      });
+    } catch {}
   });
 
   source.addEventListener('PREVIEW_READY', e => {

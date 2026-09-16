@@ -232,6 +232,19 @@ export class PreviewRecoveryService {
             message: `Rebuilt artifact failed mandatory verification: ${verification.evidence.error_summary || 'Verification failed'}`,
           } as PreviewRecoveryError;
         }
+
+        // Persist extracted workspace files into Postgres so multicontainer API can serve them
+        try {
+          if (typeof this.prototypes.saveCheckpointFiles === 'function') {
+            const { extractWorkspaceFiles } = await import('../worker/prototype-worker.js');
+            const files = await extractWorkspaceFiles(workspacePath, checkpoint.id, sessionId);
+            if (files.length > 0) {
+              await this.prototypes.saveCheckpointFiles(files);
+            }
+          }
+        } catch (fErr: any) {
+          console.warn('[PreviewRecovery] Failed to save checkpoint files on rebuild:', fErr.message);
+        }
       }
     }
 

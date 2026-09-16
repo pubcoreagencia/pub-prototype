@@ -521,7 +521,7 @@ export class PostgresPrototypeRepository implements PrototypeRepository {
   async listCheckpoints(sessionId: string): Promise<PrototypeCheckpoint[]> {
     try {
       const r = await this.pool.query(`SELECT * FROM prototype_checkpoints WHERE session_id=$1 ORDER BY prompt_index DESC`, [sessionId]);
-      if (r?.rows) {
+      if (r?.rows && r.rows.length > 0) {
         const cps = r.rows.map(mapCheckpoint);
         fallbackCheckpoints.set(sessionId, cps);
         return cps;

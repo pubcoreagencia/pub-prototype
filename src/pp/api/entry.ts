@@ -196,18 +196,69 @@ export const createPpApp = (
       if (!reqPath || reqPath === '/' || reqPath.trim() === '') {
         reqPath = 'index.html';
       }
-      reqPath = reqPath.replace(/^\/+/, '');
+      // Normalize and prevent path traversal
+      reqPath = path.posix.normalize(reqPath).replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
+      if (reqPath.startsWith('..') || reqPath.includes('../')) {
+        return res.status(400).send('Invalid file path');
+      }
+
+      // Security headers for preview iframe embedding
+      res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+      res.setHeader('Content-Security-Policy', "frame-ancestors 'self'");
+      res.setHeader('Access-Control-Allow-Origin', '*');
+
+      // State check: FAILED sessions with no checkpoints should NOT show the waiting placeholder
+      if (session.status === 'FAILED') {
+        if (reqPath === 'index.html') {
+          return res.status(200).type('html').send(`
+            <!doctype html>
+            <html>
+              <head>
+                <meta charset="utf-8">
+                <title>${session.project} — Falha na Geração</title>
+                <style>
+                  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0e0f12; color: #a1a1aa; display: grid; place-items: center; height: 100vh; margin: 0; }
+                  .card { text-align: center; max-width: 440px; padding: 32px; background: #18191f; border-radius: 12px; border: 1px solid #ef444433; }
+                  h2 { color: #fafafa; font-size: 18px; margin-top: 0; }
+                  p { font-size: 14px; line-height: 1.5; color: #71717a; }
+                  .status { display: inline-block; padding: 4px 10px; border-radius: 6px; font-size: 12px; background: #ef444422; color: #ef4444; font-weight: 600; margin-bottom: 12px; border: 1px solid #ef444444; }
+                </style>
+              </head>
+              <body>
+                <div class="card">
+                  <div class="status">FALHA NA COMPILAÇÃO</div>
+                  <h2>${session.project}</h2>
+                  <p>A tarefa de geração do protótipo falhou antes de produzir um preview funcional. Envie uma nova instrução pelo chat para reiniciar.</p>
+                </div>
+              </body>
+            </html>
+          `);
+        }
+        return res.status(404).send(`File ${reqPath} not available on failed session`);
+      }
 
       // 1. Try to serve from immutable checkpoint files stored in Postgres
-      const checkpointFile = await protoRepo.getLatestSessionFile(sessionId, reqPath);
+      // Bind to the active promoted checkpoint if available
+      let checkpointFile = null;
+      if (session.lastCheckpointSha && typeof protoRepo.listCheckpoints === 'function') {
+        const checkpoints = await protoRepo.listCheckpoints(sessionId);
+        const activeCheckpoint = checkpoints.find(c => c.commitSha === session.lastCheckpointSha);
+        if (activeCheckpoint) {
+          checkpointFile = await protoRepo.getCheckpointFile(activeCheckpoint.id, reqPath);
+        }
+      }
+
+      // Fallback to latest session file across checkpoints
+      if (!checkpointFile) {
+        checkpointFile = await protoRepo.getLatestSessionFile(sessionId, reqPath);
+      }
+
       if (checkpointFile) {
         res.setHeader('Content-Type', checkpointFile.contentType || 'text/html; charset=utf-8');
-        res.setHeader('X-Frame-Options', 'SAMEORIGIN');
-        res.setHeader('Access-Control-Allow-Origin', '*');
         return res.send(checkpointFile.content);
       }
 
-      // 2. Fallback to local workspace files if workspace exists on disk
+      // 2. Fallback to local workspace files if workspace exists on disk (same container / dev)
       if (session.workspacePath) {
         try {
           const { readFile, stat } = await import('node:fs/promises');
@@ -219,20 +270,52 @@ export const createPpApp = (
             let contentType = 'text/plain; charset=utf-8';
             if (ext === '.html' || ext === '.htm') contentType = 'text/html; charset=utf-8';
             else if (ext === '.css') contentType = 'text/css; charset=utf-8';
-            else if (ext === '.js') contentType = 'application/javascript; charset=utf-8';
+            else if (ext === '.js' || ext === '.mjs') contentType = 'application/javascript; charset=utf-8';
             else if (ext === '.json') contentType = 'application/json; charset=utf-8';
             else if (ext === '.svg') contentType = 'image/svg+xml';
+            else if (ext === '.png') contentType = 'image/png';
+            else if (ext === '.jpg' || ext === '.jpeg') contentType = 'image/jpeg';
             res.setHeader('Content-Type', contentType);
-            res.setHeader('X-Frame-Options', 'SAMEORIGIN');
             return res.send(content);
           }
         } catch {
-          // Fall through to fallback
+          // Fall through
         }
       }
 
-      // 3. Aesthetic HTML placeholder if index.html is requested before first build
+      // 3. For index.html, render state-appropriate status page
       if (reqPath === 'index.html') {
+        if (session.status === 'READY') {
+          return res.status(200).type('html').send(`
+            <!doctype html>
+            <html>
+              <head>
+                <meta charset="utf-8">
+                <title>${session.project} — Preview Indisponível</title>
+                <style>
+                  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0e0f12; color: #a1a1aa; display: grid; place-items: center; height: 100vh; margin: 0; }
+                  .card { text-align: center; max-width: 440px; padding: 32px; background: #18191f; border-radius: 12px; border: 1px solid #27272a; }
+                  h2 { color: #fafafa; font-size: 18px; margin-top: 0; }
+                  p { font-size: 14px; line-height: 1.5; color: #71717a; }
+                  .status { display: inline-block; padding: 4px 10px; border-radius: 6px; font-size: 12px; background: #27272a; color: #eab308; font-weight: 600; margin-bottom: 12px; }
+                </style>
+              </head>
+              <body>
+                <div class="card">
+                  <div class="status">SEM ARQUIVOS DE PREVIEW</div>
+                  <h2>${session.project}</h2>
+                  <p>A sessão está marcada como pronta, mas os arquivos de visualização não foram localizados para este checkpoint. Tente acionar a recarga do preview.</p>
+                </div>
+              </body>
+            </html>
+          `);
+        }
+
+        // Status is BUILDING, VERIFYING, CREATING, etc.
+        const label = session.status === 'VERIFYING'
+          ? 'Executando verificação de integridade (V0..V5)...'
+          : 'O protótipo está sendo preparado ou aguarda a conclusão da tarefa de compilação.';
+
         return res.status(200).type('html').send(`
           <!doctype html>
           <html>
@@ -251,7 +334,7 @@ export const createPpApp = (
               <div class="card">
                 <div class="status">${session.status}</div>
                 <h2>${session.project}</h2>
-                <p>O protótipo está sendo preparado ou aguarda a conclusão da tarefa de compilação.</p>
+                <p>${label}</p>
               </div>
             </body>
           </html>

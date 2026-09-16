@@ -19,7 +19,7 @@ import { VerificationGate } from '../verification/verification-gate.js';
 
 const IGNORED_DIRS = new Set(['.git', 'node_modules', '.next', '.cache', 'dist', 'build']);
 
-function getContentTypeForFile(filename: string): string {
+export function getContentTypeForFile(filename: string): string {
   const ext = path.extname(filename).toLowerCase();
   switch (ext) {
     case '.html':
@@ -52,7 +52,7 @@ function getContentTypeForFile(filename: string): string {
   }
 }
 
-async function extractWorkspaceFiles(
+export async function extractWorkspaceFiles(
   workspaceDir: string,
   checkpointId: string,
   sessionId: string
