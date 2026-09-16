@@ -45,6 +45,11 @@ export const PROTOTYPE_EVENT_TYPES = [
   'correction_succeeded',
   'correction_failed',
   'correction_escalated',
+  'verification_recovery_started',
+  'verification_recovery_attempt_started',
+  'verification_recovery_attempt_succeeded',
+  'verification_recovery_attempt_failed',
+  'verification_recovery_exhausted',
 ] as const;
 export type PrototypeEventType = typeof PROTOTYPE_EVENT_TYPES[number];
 
@@ -169,6 +174,37 @@ export interface PrototypeVerification {
   finishedAt: Date | null;
   durationMs: number | null;
   createdAt: Date;
+}
+
+// === PP 2.1: AUTONOMOUS VERIFICATION RECOVERY CONTRACTS ===
+export type CorrectionAttemptStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'ESCALATED';
+
+export interface PrototypeCorrectionAttempt {
+  id: string;
+  sessionId: string;
+  taskId: string;
+  sourceVerificationId: string;
+  sourceCheckpointId: string;
+  attemptNumber: number;
+  status: CorrectionAttemptStatus;
+  resultCommitSha: string | null;
+  resultCheckpointId: string | null;
+  resultVerificationId: string | null;
+  failureEvidence: Record<string, unknown>;
+  error: string | null;
+  startedAt: Date;
+  finishedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface CreateCorrectionAttemptInput {
+  sessionId: string;
+  taskId: string;
+  sourceVerificationId: string;
+  sourceCheckpointId: string;
+  attemptNumber: number;
+  failureEvidence?: Record<string, unknown>;
 }
 
 export interface PrototypeMessage {
