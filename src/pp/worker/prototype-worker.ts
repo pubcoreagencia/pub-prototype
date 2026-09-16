@@ -16,6 +16,7 @@ import { OperationalEventBridge } from '../events/bridge.js';
 import { loadOpenRouterConfig } from '../../providers/openrouterConfig.js';
 import { CorrectionController } from './correction-controller.js';
 import { VerificationGate } from '../verification/verification-gate.js';
+import { VerificationRecoveryOrchestrator } from './verification-recovery-orchestrator.js';
 
 const IGNORED_DIRS = new Set(['.git', 'node_modules', '.next', '.cache', 'dist', 'build']);
 
@@ -556,7 +557,7 @@ export class PrototypeWorker {
       }
 
       await this.events.emit({ sessionId, type: 'BUILD_STARTED', payload: { taskId: task.id, phase: 'finalize' } });
-      const finalize = await finalizer.finalize(task.objective, task.prompt, {
+      let finalize = await finalizer.finalize(task.objective, task.prompt, {
         testCommand: process.env.TASK_TEST_COMMAND || null,
         commitMessage: `prototype(${task.project}): prompt ${task.id}`,
         expectChanges: false,
@@ -594,7 +595,7 @@ export class PrototypeWorker {
             workspacePath: workspace,
             gitStatus: finalize.gitStatus,
             error: finalError,
-            result: { finalize, provider: result.provider, model: result.model, durationMs },
+            result: { finalize: controller.lastFinalizeResult ?? finalize, provider: result.provider, model: result.model, durationMs },
             leaseOwner: null,
             leaseDeadline: null,
           });
@@ -609,7 +610,10 @@ export class PrototypeWorker {
           });
           return true;
         }
-        // decision === 'SUCCESS': fall through to the success path below
+        // decision === 'SUCCESS': update finalize with new corrected result
+        if (controller.lastFinalizeResult) {
+          finalize = controller.lastFinalizeResult as any;
+        }
       }
 
 
@@ -780,7 +784,7 @@ export class PrototypeWorker {
           return true;
         }
       } else {
-        // Verification FAILED
+        // Verification FAILED — Enter PP 2.1 Autonomous Verification Recovery Loop
         await this.events.emit({
           sessionId,
           type: 'VERIFICATION_FAILED',
@@ -792,6 +796,53 @@ export class PrototypeWorker {
           },
         });
 
+        const recoveryOrchestrator = new VerificationRecoveryOrchestrator(
+          this.prototypes,
+          this.provider,
+          this.events
+        );
+
+        const recoveryResult = await recoveryOrchestrator.runRecoveryLoop(
+          currentSession!,
+          task,
+          checkpoint,
+          verification,
+          workspace,
+          {
+            previewUrl: resolvedPreviewUrl,
+            previewRuntime: preview.id,
+            expectedCurrentSha,
+          }
+        );
+
+        if (recoveryResult.status === 'SUCCESS' && recoveryResult.lastCheckpoint && recoveryResult.lastVerification) {
+          await this.tasks.update(task.id, { status: 'COMPLETED' });
+          task.status = 'COMPLETED';
+
+          await this.prototypes.updateSession(sessionId, {
+            status: 'READY',
+            workspacePath: workspace,
+            previewUrl: resolvedPreviewUrl,
+            lastCheckpointSha: recoveryResult.lastCheckpoint.commitSha,
+          });
+
+          await this.events.emit({
+            sessionId,
+            type: 'PREVIEW_READY',
+            payload: {
+              sessionId,
+              url: resolvedPreviewUrl,
+              publicUrl,
+              runtimeId: preview.id,
+              port: preview.port,
+              checkpointId: recoveryResult.lastCheckpoint.id,
+              verificationId: recoveryResult.lastVerification.id,
+            },
+          });
+          return true;
+        }
+
+        // Recovery exhausted, failed, or concurrency conflict
         const latestSession = await this.prototypes.getSession(sessionId);
         const hasPriorFunctionalState = Boolean(latestSession?.lastCheckpointSha || latestSession?.previewUrl);
 
@@ -801,16 +852,17 @@ export class PrototypeWorker {
           workspacePath: workspace,
         });
 
+        const failureReason = recoveryResult.error || verification.evidence.error_summary || 'Verification gate recovery failed';
         await this.tasks.update(task.id, {
           status: 'FAILED',
-          error: verification.evidence.error_summary || 'Verification gate failed',
+          error: failureReason,
         });
         task.status = 'FAILED';
 
         await this.events.emit({
           sessionId,
           type: 'PREVIEW_FAILED',
-          payload: { error: verification.evidence.error_summary },
+          payload: { error: failureReason },
         });
         return true;
       }
