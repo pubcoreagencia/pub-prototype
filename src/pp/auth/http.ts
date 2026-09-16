@@ -6,6 +6,7 @@ import { SovereignAuthProvider } from './sovereign-provider.js';
 import { hashPassword, verifyPassword } from './sovereign/password.js';
 import type { PostgresPrototypeRepository } from '../persistence/repository.js';
 import type { KeyManager } from './sovereign/key-manager.js';
+import { ClaimManager, type EmailAdapter } from './sovereign/claim.js';
 import { isAllowedOrigin } from '../config/origins.js';
 
 export const REFRESH_COOKIE_NAME = 'pp_refresh_token';
@@ -16,6 +17,8 @@ export interface CreateAuthRouterOptions {
   sovereignProvider?: SovereignAuthProvider;
   protoRepo?: PostgresPrototypeRepository;
   keyManager?: KeyManager;
+  claimManager?: ClaimManager;
+  emailAdapter?: EmailAdapter;
 }
 
 /**
@@ -481,6 +484,100 @@ export function createSovereignAuthRouter(options: CreateAuthRouterOptions): Rou
       if (err.code === '23505') { // Postgres unique_violation
         return res.status(409).json({ error: 'SLUG_EXISTS' });
       }
+      return res.status(500).json({ error: 'INTERNAL_ERROR' });
+    }
+  });
+
+  // 8. Account Claim Endpoints (Phase 4.4 - Identity Transition)
+  const claimLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 5, // 5 claim requests per 15 minutes per IP
+    message: { error: 'RATE_LIMITED' },
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
+  const claimManager = options.claimManager ?? new ClaimManager({
+    pool,
+    emailAdapter: options.emailAdapter,
+  });
+
+  // POST /prototype/auth/claim/request
+  // Enumeration-resistant: always returns uniform 200 OK message
+  router.post('/claim/request', claimLimiter, async (req: Request, res: Response) => {
+    try {
+      const { email: rawEmail } = req.body ?? {};
+      const email = normalizeEmail(rawEmail);
+      if (!email) {
+        return res.status(400).json({ error: 'INVALID_REQUEST' });
+      }
+
+      const result = await claimManager.requestClaim(email);
+      return res.status(200).json({
+        message: result.message,
+      });
+    } catch (err) {
+      return res.status(500).json({ error: 'INTERNAL_ERROR' });
+    }
+  });
+
+  // POST /prototype/auth/claim/confirm
+  // Atomically validates and marks single-use token, sets scrypt password hash, and issues sovereign session
+  router.post('/claim/confirm', claimLimiter, async (req: Request, res: Response) => {
+    try {
+      const { token, password } = req.body ?? {};
+
+      if (!token || typeof token !== 'string' || !token.trim()) {
+        return res.status(400).json({ error: 'INVALID_OR_EXPIRED_TOKEN' });
+      }
+
+      if (!validatePassword(password)) {
+        return res.status(400).json({ error: 'INVALID_PASSWORD', message: 'Password must be between 8 and 128 characters' });
+      }
+
+      let confirmedUser: { userId: string; email: string; name?: string };
+      try {
+        confirmedUser = await claimManager.confirmClaim(token, password);
+      } catch (err: any) {
+        if (err.message === 'INVALID_OR_EXPIRED_TOKEN') {
+          return res.status(400).json({ error: 'INVALID_OR_EXPIRED_TOKEN' });
+        }
+        if (err.message === 'INVALID_PASSWORD') {
+          return res.status(400).json({ error: 'INVALID_PASSWORD' });
+        }
+        return res.status(500).json({ error: 'INTERNAL_ERROR' });
+      }
+
+      // Fetch fresh user record
+      const userRes = await pool.query(
+        'SELECT id, email, name, avatar_url, status, created_at, updated_at FROM users WHERE id = $1',
+        [confirmedUser.userId]
+      );
+      const user = userRes.rows[0];
+
+      // Issue Sovereign session & refresh token cookie
+      const userAgent = req.headers['user-agent'] as string | undefined;
+      const ipAddress = req.ip || (req.socket.remoteAddress as string | undefined);
+      const tokens = await provider.issueSession(user.id, { userAgent, ipAddress });
+
+      setRefreshCookie(res, tokens.refreshToken);
+
+      return res.status(200).json({
+        message: 'Account successfully activated.',
+        accessToken: tokens.accessToken,
+        tokenType: 'Bearer',
+        expiresIn: tokens.expiresIn,
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          avatarUrl: user.avatar_url,
+          status: user.status,
+          createdAt: user.created_at,
+          updatedAt: user.updated_at,
+        },
+      });
+    } catch (err) {
       return res.status(500).json({ error: 'INTERNAL_ERROR' });
     }
   });

@@ -1625,6 +1625,19 @@ export class PostgresPrototypeRepository implements PrototypeRepository {
         CREATE INDEX IF NOT EXISTS auth_sessions_refresh_hash_idx ON auth_sessions(refresh_token_hash);
         CREATE INDEX IF NOT EXISTS auth_sessions_family_idx ON auth_sessions(family_id);
         CREATE INDEX IF NOT EXISTS auth_sessions_expires_revoked_idx ON auth_sessions(expires_at, revoked_at);
+
+        -- Account Claim Tokens (009)
+        CREATE TABLE IF NOT EXISTS account_claim_tokens (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          token_hash TEXT NOT NULL,
+          expires_at TIMESTAMPTZ NOT NULL,
+          used_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+
+        CREATE INDEX IF NOT EXISTS account_claim_tokens_hash_idx ON account_claim_tokens(token_hash);
+        CREATE INDEX IF NOT EXISTS account_claim_tokens_user_idx ON account_claim_tokens(user_id);
       `);
       console.log('[PostgresPrototypeRepository] Schema initialized successfully');
     } catch (err: any) {
