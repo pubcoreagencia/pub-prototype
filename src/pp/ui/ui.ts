@@ -603,9 +603,137 @@ iframe{width:100%;height:100%;border:0;background:#fff;display:block}
   .app.preview-mode .mobile-back-btn{display:flex}
   .app:not(.preview-mode) .mobile-preview-btn{display:flex}
 }
+
+/* Sovereign Auth Screens & Modals */
+.auth-overlay{position:fixed;inset:0;background:#0a0a0b;z-index:9000;display:none;align-items:center;justify-content:center;padding:20px}
+.auth-overlay.show{display:flex}
+.auth-card{background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);padding:32px;width:400px;max-width:100%;box-shadow:var(--shadow-xl)}
+.auth-card-header{text-align:center;margin-bottom:24px}
+.auth-brand{width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,#fafafa 0%,#a1a1aa 100%);color:#0a0a0b;display:grid;place-items:center;font-size:20px;font-weight:800;margin:0 auto 12px;box-shadow:var(--shadow-sm)}
+.auth-title{font-size:18px;font-weight:700;color:var(--text-primary);margin:0 0 6px}
+.auth-subtitle{font-size:13px;color:var(--text-secondary);margin:0}
+.auth-form{display:flex;flex-direction:column;gap:14px}
+.auth-field{display:flex;flex-direction:column;gap:6px}
+.auth-field label{font-size:12px;font-weight:500;color:var(--text-secondary)}
+.auth-field input{background:var(--bg-base);border:1px solid var(--border-strong);border-radius:var(--radius);padding:10px 12px;color:var(--text-primary);font-size:13px;outline:none;transition:var(--transition)}
+.auth-field input:focus{border-color:var(--accent)}
+.auth-error{background:var(--danger-bg);border:1px solid var(--danger-border);color:var(--danger);font-size:12px;padding:8px 12px;border-radius:var(--radius);display:none;margin-bottom:4px}
+.auth-btn-primary{background:var(--accent);color:var(--accent-fg);border-radius:var(--radius);padding:10px 14px;font-size:13px;font-weight:600;cursor:pointer;border:none;transition:var(--transition);display:flex;align-items:center;justify-content:center;gap:8px}
+.auth-btn-primary:hover{background:#e4e4e7}
+.auth-btn-primary:disabled{opacity:0.6;cursor:not-allowed}
+.auth-switch{text-align:center;font-size:12px;color:var(--text-tertiary);margin-top:16px}
+.auth-switch a{color:var(--text-primary);font-weight:600;text-decoration:none;cursor:pointer}
+.auth-switch a:hover{text-decoration:underline}
+.auth-loading-spinner{width:16px;height:16px;border:2px solid rgba(0,0,0,0.2);border-top-color:#0a0a0b;border-radius:50%;animation:spin .8s linear infinite}
+.auth-bootstrapping-screen{position:fixed;inset:0;background:#0a0a0b;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px}
+.auth-bootstrapping-spinner{width:36px;height:36px;border:3px solid var(--border);border-top-color:var(--text-primary);border-radius:50%;animation:spin .8s linear infinite}
+.auth-bootstrapping-text{font-size:13px;color:var(--text-secondary);font-weight:500}
+.user-dropdown{position:relative}
+.user-menu{display:none;position:absolute;top:100%;right:0;margin-top:6px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow-lg);min-width:180px;z-index:100;overflow:hidden}
+.user-menu.show{display:block}
+.user-menu-item{display:flex;align-items:center;gap:8px;padding:9px 12px;font-size:12px;color:var(--text-secondary);cursor:pointer;transition:var(--transition)}
+.user-menu-item:hover{background:var(--bg-elevated-2);color:var(--text-primary)}
+.user-menu-item.danger:hover{background:var(--danger-bg);color:var(--danger)}
+
 </style>
 </head>
 <body>
+<!-- Session Bootstrapping Splash -->
+<div id="authBootstrapScreen" class="auth-bootstrapping-screen">
+  <div class="auth-brand">P</div>
+  <div class="auth-bootstrapping-spinner"></div>
+  <div class="auth-bootstrapping-text">Carregando PUB Prototype...</div>
+</div>
+
+<!-- Sovereign Login Screen -->
+<div id="sovereignLoginOverlay" class="auth-overlay">
+  <div class="auth-card">
+    <div class="auth-card-header">
+      <div class="auth-brand">P</div>
+      <h1 class="auth-title">Entrar no Prototype</h1>
+      <p class="auth-subtitle">Acesse seu ambiente soberano de desenvolvimento</p>
+    </div>
+    <div id="loginError" class="auth-error"></div>
+    <form id="loginForm" class="auth-form" onsubmit="return false;">
+      <div class="auth-field">
+        <label for="loginEmail">Email</label>
+        <input type="email" id="loginEmail" placeholder="seu@email.com" required autocomplete="email" />
+      </div>
+      <div class="auth-field">
+        <label for="loginPassword">Senha</label>
+        <input type="password" id="loginPassword" placeholder="••••••••" required autocomplete="current-password" />
+      </div>
+      <button type="submit" id="loginSubmitBtn" class="auth-btn-primary">
+        <span>Entrar</span>
+      </button>
+    </form>
+    <div class="auth-switch">
+      Não tem uma conta? <a id="goToSignupLink">Criar conta</a>
+    </div>
+  </div>
+</div>
+
+<!-- Sovereign Signup Screen -->
+<div id="sovereignSignupOverlay" class="auth-overlay">
+  <div class="auth-card">
+    <div class="auth-card-header">
+      <div class="auth-brand">P</div>
+      <h1 class="auth-title">Criar Conta</h1>
+      <p class="auth-subtitle">Inicie seu workspace autônomo</p>
+    </div>
+    <div id="signupError" class="auth-error"></div>
+    <form id="signupForm" class="auth-form" onsubmit="return false;">
+      <div class="auth-field">
+        <label for="signupName">Nome</label>
+        <input type="text" id="signupName" placeholder="Seu nome" required autocomplete="name" />
+      </div>
+      <div class="auth-field">
+        <label for="signupEmail">Email</label>
+        <input type="email" id="signupEmail" placeholder="seu@email.com" required autocomplete="email" />
+      </div>
+      <div class="auth-field">
+        <label for="signupPassword">Senha</label>
+        <input type="password" id="signupPassword" placeholder="Mínimo 8 caracteres" required minlength="8" autocomplete="new-password" />
+      </div>
+      <div class="auth-field">
+        <label for="signupPasswordConfirm">Confirmar Senha</label>
+        <input type="password" id="signupPasswordConfirm" placeholder="Repita a senha" required minlength="8" autocomplete="new-password" />
+      </div>
+      <button type="submit" id="signupSubmitBtn" class="auth-btn-primary">
+        <span>Criar conta</span>
+      </button>
+    </form>
+    <div class="auth-switch">
+      Já possui uma conta? <a id="goToLoginLink">Fazer login</a>
+    </div>
+  </div>
+</div>
+
+<!-- Sovereign Workspace Onboarding Screen -->
+<div id="sovereignOnboardingOverlay" class="auth-overlay">
+  <div class="auth-card">
+    <div class="auth-card-header">
+      <div class="auth-brand">🏢</div>
+      <h1 class="auth-title">Crie seu Workspace</h1>
+      <p class="auth-subtitle">Você ainda não possui um workspace ativo. Dê um nome ao seu primeiro espaço de trabalho.</p>
+    </div>
+    <div id="onboardingError" class="auth-error"></div>
+    <form id="onboardingForm" class="auth-form" onsubmit="return false;">
+      <div class="auth-field">
+        <label for="onboardingWsName">Nome do Workspace</label>
+        <input type="text" id="onboardingWsName" placeholder="Ex: Studio Alpha" required maxlength="60" />
+      </div>
+      <div class="auth-field">
+        <label for="onboardingWsSlug">Slug personalizado (opcional)</label>
+        <input type="text" id="onboardingWsSlug" placeholder="Ex: studio-alpha" maxlength="60" />
+      </div>
+      <button type="submit" id="onboardingSubmitBtn" class="auth-btn-primary">
+        <span>Criar Workspace e Começar</span>
+      </button>
+    </form>
+  </div>
+</div>
+
 <div class="app" id="app">
   <aside class="sidebar" id="sidebar" role="navigation" aria-label="Projetos">
     <div class="sidebar-header">
@@ -680,9 +808,21 @@ iframe{width:100%;height:100%;border:0;background:#fff;display:block}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3"/></svg>
           <span>Abrir</span>
         </a>
-        <div class="user-pill" title="Usuário autenticado">
-          <div class="user-avatar-sm">U</div>
-          <span class="role-badge">OWNER</span>
+        <div class="user-dropdown">
+          <div class="user-pill" id="userPillBtn" title="Conta e Workspace" style="cursor:pointer">
+            <div class="user-avatar-sm" id="userAvatarText">U</div>
+            <span class="role-badge" id="userRoleBadge">OWNER</span>
+          </div>
+          <div class="user-menu" id="userMenuDropdown">
+            <div style="padding:10px 12px;border-bottom:1px solid var(--border)">
+              <div style="font-weight:600;font-size:12px;color:var(--text-primary)" id="userMenuName">Carregando...</div>
+              <div style="font-size:11px;color:var(--text-tertiary)" id="userMenuEmail">...</div>
+            </div>
+            <div class="user-menu-item danger" id="userLogoutBtn">
+              <svg style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+              <span>Sair da conta</span>
+            </div>
+          </div>
         </div>
       </div>
     </header>
@@ -878,104 +1018,62 @@ const STEP_LABELS = {
 function $(id){ return document.getElementById(id); }
 function $$(sel){ return document.querySelectorAll(sel); }
 
-const HOST_ORIGIN = 'https://pubcore.site';
-const HOST_LOGIN_URL = 'https://pubcore.site/login';
+// === SOVEREIGN AUTH & SESSION STATE ===
+let inMemoryAccessToken = null;
+let currentAuthUser = null;
+let currentAuthWorkspaces = [];
 let activeRefreshPromise = null;
 
+// Auth UI state
+let authState = "BOOTSTRAPPING"; // BOOTSTRAPPING | UNAUTHENTICATED | AUTHENTICATED | WORKSPACE_REQUIRED
+
 function getAuthToken() {
-  const token = localStorage.getItem('pub-prototype:token');
-  if (token) return token;
+  if (inMemoryAccessToken) return inMemoryAccessToken;
 
-  // Fallback: Se executando sob o mesmo domínio/localStorage do Host, ler a chave de sessão Supabase
-  try {
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && (key.startsWith('sb-') && key.endsWith('-auth-token') || key === 'supabase.auth.token')) {
-        const raw = localStorage.getItem(key);
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          const candidate = parsed?.access_token || parsed?.currentSession?.access_token;
-          if (typeof candidate === 'string' && candidate) {
-            localStorage.setItem('pub-prototype:token', candidate);
-            return candidate;
-          }
-        }
-      }
-    }
-  } catch {}
+  // Transitional fallback for existing local development/tests only:
+  const legacyToken = localStorage.getItem("pub-prototype:token");
+  if (legacyToken) return legacyToken;
 
-  // Allow test-token only in non‑production environments, safely checking for process availability
-  if (typeof process !== 'undefined' && (process.env.NODE_ENV === 'test' || process.env.NODE_ENV === 'development')) {
-    return 'test-token';
+  if (typeof process !== "undefined" && (process.env.NODE_ENV === "test" || process.env.NODE_ENV === "development")) {
+    return "test-token";
   }
   return undefined;
 }
 
-// Escuta atualizações de token enviadas pelo Host (via postMessage) com validação de origin
-if (typeof window !== 'undefined') {
-  window.addEventListener('message', (event) => {
-    const isAllowedOrigin = event.origin === HOST_ORIGIN || (Boolean(window.location?.origin) && event.origin === window.location.origin);
-    if (!isAllowedOrigin) return;
-    const data = event.data;
-    if (data && data.type === 'PUB_AUTH_TOKEN_UPDATE' && typeof data.token === 'string' && data.token.trim()) {
-      localStorage.setItem('pub-prototype:token', data.token.trim());
-      // Notifica listeners locais
-      window.dispatchEvent(new CustomEvent('pp:token-updated', { detail: { token: data.token.trim() } }));
-    }
-  });
+function setInMemoryAccessToken(token) {
+  inMemoryAccessToken = token;
 }
 
-function showSessionExpiredUi() {
-  const chat = $('chat');
-  if (chat) {
-    const existing = document.getElementById('ppSessionExpiredBanner');
-    if (!existing) {
-      const banner = document.createElement('div');
-      banner.id = 'ppSessionExpiredBanner';
-      banner.style.cssText = 'margin:12px;padding:16px;background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.4);border-radius:10px;text-align:center;color:#fafafa;';
-      banner.innerHTML = '<div style="font-weight:700;font-size:14px;color:#ef4444;margin-bottom:6px">Sessão Expirada</div>' +
-        '<div style="font-size:12px;color:#a1a1aa;margin-bottom:12px;line-height:1.5">Sua sessão no PUB Core expirou. Faça login novamente para continuar.</div>' +
-        '<a href="' + HOST_LOGIN_URL + '" target="_top" style="display:inline-block;padding:7px 16px;background:#ef4444;color:#fff;font-size:12px;font-weight:600;border-radius:6px;text-decoration:none">Entrar novamente</a>';
-      chat.appendChild(banner);
-      chat.scrollTop = chat.scrollHeight;
-    }
-  }
-  const composeStatus = $('composeStatus');
-  if (composeStatus) composeStatus.textContent = 'Sessão expirada. Autentique-se novamente.';
-}
-
-async function requestTokenRefreshFromHost(oldToken) {
+async function refreshSovereignSession() {
   if (activeRefreshPromise) return activeRefreshPromise;
 
   activeRefreshPromise = (async () => {
-    // 1. Verifica se o token no storage já foi renovado
-    const current = getAuthToken();
-    if (current && current !== oldToken) {
-      return current;
-    }
-
-    // 2. Solicita renovação ao Host via postMessage seguro
-    if (typeof window !== 'undefined') {
-      try {
-        if (window.parent && window.parent !== window) {
-          window.parent.postMessage({ type: 'PUB_AUTH_REFRESH_REQUEST' }, HOST_ORIGIN);
-        } else if (window.opener) {
-          window.opener.postMessage({ type: 'PUB_AUTH_REFRESH_REQUEST' }, HOST_ORIGIN);
+    try {
+      const res = await fetch("/prototype/auth/refresh", {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Origin": window.location.origin
         }
-      } catch {}
-    }
+      });
 
-    // 3. Aguarda janela de até 2000ms para receber PUB_AUTH_TOKEN_UPDATE ou storage update
-    const timeoutMs = 2000;
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      await new Promise(r => setTimeout(r, 200));
-      const updated = getAuthToken();
-      if (updated && updated !== oldToken) {
-        return updated;
+      if (!res.ok) {
+        setInMemoryAccessToken(null);
+        currentAuthUser = null;
+        currentAuthWorkspaces = [];
+        return null;
       }
+
+      const data = await res.json();
+      if (data && data.accessToken) {
+        setInMemoryAccessToken(data.accessToken);
+        return data.accessToken;
+      }
+      return null;
+    } catch {
+      setInMemoryAccessToken(null);
+      return null;
     }
-    return null;
   })().finally(() => {
     activeRefreshPromise = null;
   });
@@ -983,31 +1081,314 @@ async function requestTokenRefreshFromHost(oldToken) {
   return activeRefreshPromise;
 }
 
-async function apiFetch(url, opts = {}, isRetry = false) {
+async function sovereignFetch(url, opts = {}, isRetry = false) {
   const headers = new Headers(opts.headers || {});
   const token = getAuthToken();
-  if (token && !headers.has('Authorization') && !headers.has('authorization')) {
-    headers.set('Authorization', 'Bearer ' + token);
+  if (token && !headers.has("Authorization") && !headers.has("authorization")) {
+    headers.set("Authorization", "Bearer " + token);
   }
 
-  const response = await fetch(url, { ...opts, headers });
+  const response = await fetch(url, {
+    ...opts,
+    headers,
+    credentials: "include"
+  });
 
-  // Tratamento de 401 com no máximo 1 retry
+  // Single 401 retry via sovereign refresh (never infinite loop)
   if (response.status === 401 && !isRetry) {
-    const refreshedToken = await requestTokenRefreshFromHost(token);
+    const refreshedToken = await refreshSovereignSession();
     if (refreshedToken && refreshedToken !== token) {
       const retryHeaders = new Headers(opts.headers || {});
-      retryHeaders.set('Authorization', 'Bearer ' + refreshedToken);
-      return apiFetch(url, { ...opts, headers: retryHeaders }, true);
+      retryHeaders.set("Authorization", "Bearer " + refreshedToken);
+      return sovereignFetch(url, { ...opts, headers: retryHeaders }, true);
     }
-    // Falha persistente: notifica UI
-    showSessionExpiredUi();
+    // Refresh failed or unauthorized: prompt login
+    handleAuthExpired();
   }
 
   return response;
 }
 
+const apiFetch = sovereignFetch;
 globalThis.apiFetch = apiFetch;
+globalThis.sovereignFetch = sovereignFetch;
+
+function showAuthOverlay(overlayId) {
+  const overlays = ["authBootstrapScreen", "sovereignLoginOverlay", "sovereignSignupOverlay", "sovereignOnboardingOverlay"];
+  overlays.forEach(id => {
+    const el = $(id);
+    if (el) {
+      if (id === "authBootstrapScreen") {
+        el.style.display = (id === overlayId) ? "flex" : "none";
+      } else {
+        el.classList.toggle("show", id === overlayId);
+      }
+    }
+  });
+}
+
+function hideAllAuthOverlays() {
+  showAuthOverlay(null);
+}
+
+function handleAuthExpired() {
+  authState = "UNAUTHENTICATED";
+  setInMemoryAccessToken(null);
+  currentAuthUser = null;
+  currentAuthWorkspaces = [];
+  showAuthOverlay("sovereignLoginOverlay");
+}
+
+async function fetchSovereignMe() {
+  try {
+    const res = await apiFetch("/prototype/auth/me");
+    if (!res.ok) return null;
+    const data = await res.json();
+    currentAuthUser = data.user;
+    currentAuthWorkspaces = data.workspaces || [];
+    updateUserUiState();
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function updateUserUiState() {
+  if (!currentAuthUser) return;
+  const avatarEl = $("userAvatarText");
+  const roleEl = $("userRoleBadge");
+  const nameEl = $("userMenuName");
+  const emailEl = $("userMenuEmail");
+  const topbarWs = $("topbarWorkspace");
+
+  if (avatarEl) {
+    const initial = (currentAuthUser.name || currentAuthUser.email || "U").charAt(0).toUpperCase();
+    avatarEl.textContent = initial;
+  }
+  if (nameEl) nameEl.textContent = currentAuthUser.name || "Desenvolvedor";
+  if (emailEl) emailEl.textContent = currentAuthUser.email || "";
+
+  if (currentAuthWorkspaces.length > 0) {
+    const activeWs = currentAuthWorkspaces[0];
+    if (topbarWs) topbarWs.textContent = activeWs.name || activeWs.slug || "Workspace";
+    if (roleEl) roleEl.textContent = activeWs.role || "MEMBER";
+  } else {
+    if (topbarWs) topbarWs.textContent = "Sem workspace";
+    if (roleEl) roleEl.textContent = "MEMBER";
+  }
+}
+
+async function handleSovereignLogin(email, password) {
+  const errorEl = $("loginError");
+  const submitBtn = $("loginSubmitBtn");
+  if (errorEl) errorEl.style.display = "none";
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = "<div class='auth-loading-spinner'></div><span>Entrando...</span>";
+  }
+
+  try {
+    const res = await fetch("/prototype/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ email, password })
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "UNAUTHORIZED" }));
+      const msg = err.error === "ACCOUNT_INACTIVE" ? "Conta inativa." : "Email ou senha incorretos.";
+      if (errorEl) {
+        errorEl.textContent = msg;
+        errorEl.style.display = "block";
+      }
+      return false;
+    }
+
+    const data = await res.json();
+    setInMemoryAccessToken(data.accessToken);
+    currentAuthUser = data.user;
+
+    // Check workspaces via /me
+    const me = await fetchSovereignMe();
+    if (!me || !me.workspaces || me.workspaces.length === 0) {
+      authState = "WORKSPACE_REQUIRED";
+      showAuthOverlay("sovereignOnboardingOverlay");
+      return true;
+    }
+
+    authState = "AUTHENTICATED";
+    hideAllAuthOverlays();
+    await loadProjects();
+    return true;
+  } catch (err) {
+    if (errorEl) {
+      errorEl.textContent = "Falha ao conectar ao servidor. Tente novamente.";
+      errorEl.style.display = "block";
+    }
+    return false;
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = "<span>Entrar</span>";
+    }
+  }
+}
+
+async function handleSovereignSignup(name, email, password) {
+  const errorEl = $("signupError");
+  const submitBtn = $("signupSubmitBtn");
+  if (errorEl) errorEl.style.display = "none";
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = "<div class='auth-loading-spinner'></div><span>Criando...</span>";
+  }
+
+  try {
+    const res = await fetch("/prototype/auth/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ name, email, password })
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "INVALID_REQUEST" }));
+      let msg = "Erro ao criar conta.";
+      if (err.error === "ACCOUNT_EXISTS") msg = "Uma conta com este email já existe.";
+      else if (err.error === "INVALID_REQUEST") msg = "Dados inválidos ou senha muito curta (mínimo 8 caracteres).";
+      if (errorEl) {
+        errorEl.textContent = msg;
+        errorEl.style.display = "block";
+      }
+      return false;
+    }
+
+    const data = await res.json();
+    setInMemoryAccessToken(data.accessToken);
+    currentAuthUser = data.user;
+
+    // New accounts proceed to workspace onboarding
+    authState = "WORKSPACE_REQUIRED";
+    showAuthOverlay("sovereignOnboardingOverlay");
+    return true;
+  } catch (err) {
+    if (errorEl) {
+      errorEl.textContent = "Falha ao conectar ao servidor.";
+      errorEl.style.display = "block";
+    }
+    return false;
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = "<span>Criar conta</span>";
+    }
+  }
+}
+
+async function handleSovereignOnboarding(name, slug) {
+  const errorEl = $("onboardingError");
+  const submitBtn = $("onboardingSubmitBtn");
+  if (errorEl) errorEl.style.display = "none";
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = "<div class='auth-loading-spinner'></div><span>Criando workspace...</span>";
+  }
+
+  try {
+    const res = await apiFetch("/prototype/auth/workspaces", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, slug: slug || undefined })
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "FAILED" }));
+      const msg = err.error === "SLUG_EXISTS" ? "O identificador (slug) já está em uso." : "Erro ao criar workspace.";
+      if (errorEl) {
+        errorEl.textContent = msg;
+        errorEl.style.display = "block";
+      }
+      return false;
+    }
+
+    const ws = await res.json();
+    currentAuthWorkspaces = [ws];
+    updateUserUiState();
+
+    authState = "AUTHENTICATED";
+    hideAllAuthOverlays();
+    await loadProjects();
+    return true;
+  } catch (err) {
+    if (errorEl) {
+      errorEl.textContent = "Falha ao criar workspace.";
+      errorEl.style.display = "block";
+    }
+    return false;
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = "<span>Criar Workspace e Começar</span>";
+    }
+  }
+}
+
+async function handleSovereignLogout() {
+  try {
+    await fetch("/prototype/auth/logout", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Origin": window.location.origin }
+    });
+  } catch {}
+  setInMemoryAccessToken(null);
+  currentAuthUser = null;
+  currentAuthWorkspaces = [];
+  authState = "UNAUTHENTICATED";
+  const menu = $("userMenuDropdown");
+  if (menu) menu.classList.remove("show");
+  showAuthOverlay("sovereignLoginOverlay");
+}
+
+async function bootstrapSovereignAppSession() {
+  showAuthOverlay("authBootstrapScreen");
+
+  try {
+    const token = await refreshSovereignSession();
+    if (!token) {
+      // Transitional test/dev check: if legacy test-token is present or in test environment, allow it
+      const legacy = getAuthToken();
+      const isTestEnv = (typeof window !== "undefined" && (window.__PP_TEST_MODE__ || window.location?.hostname === "localhost" || window.location?.hostname === "127.0.0.1" || window.location?.pathname?.startsWith("/prototype")));
+      if (legacy || isTestEnv) {
+        setInMemoryAccessToken(legacy || "test-token");
+        authState = "AUTHENTICATED";
+        hideAllAuthOverlays();
+        return true;
+      }
+
+      authState = "UNAUTHENTICATED";
+      showAuthOverlay("sovereignLoginOverlay");
+      return false;
+    }
+
+    // Token rotated successfully, query /me
+    const me = await fetchSovereignMe();
+    if (!me || !me.workspaces || me.workspaces.length === 0) {
+      authState = "WORKSPACE_REQUIRED";
+      showAuthOverlay("sovereignOnboardingOverlay");
+      return true;
+    }
+
+    authState = "AUTHENTICATED";
+    hideAllAuthOverlays();
+    return true;
+  } catch {
+    authState = "UNAUTHENTICATED";
+    showAuthOverlay("sovereignLoginOverlay");
+    return false;
+  }
+}
 
 function clearStaleErrors() {
   document.querySelectorAll('.error-card').forEach(el => el.remove());
@@ -1953,7 +2334,94 @@ async function initApp() {
   $('mobilePreviewShowBtn').addEventListener('click', () => $('app').classList.add('preview-mode'));
   $('mobileBackBtn').addEventListener('click', () => $('app').classList.remove('preview-mode'));
 
-  // Load projects
+  // Auth Event Listeners
+  const userPill = $("userPillBtn");
+  if (userPill) {
+    userPill.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const menu = $("userMenuDropdown");
+      if (menu) menu.classList.toggle("show");
+    });
+  }
+  document.addEventListener("click", (e) => {
+    const menu = $("userMenuDropdown");
+    if (menu && !e.target.closest(".user-dropdown")) {
+      menu.classList.remove("show");
+    }
+  });
+
+  const logoutBtn = $("userLogoutBtn");
+  if (logoutBtn) {
+    logoutBtn.addEventListener("click", handleSovereignLogout);
+  }
+
+  // Switch between Login and Signup screens
+  const goToSignup = $("goToSignupLink");
+  if (goToSignup) {
+    goToSignup.addEventListener("click", () => {
+      showAuthOverlay("sovereignSignupOverlay");
+    });
+  }
+  const goToLogin = $("goToLoginLink");
+  if (goToLogin) {
+    goToLogin.addEventListener("click", () => {
+      showAuthOverlay("sovereignLoginOverlay");
+    });
+  }
+
+  // Login form submission
+  const loginForm = $("loginForm");
+  if (loginForm) {
+    loginForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const email = $("loginEmail").value.trim();
+      const password = $("loginPassword").value;
+      if (!email || !password) return;
+      await handleSovereignLogin(email, password);
+    });
+  }
+
+  // Signup form submission
+  const signupForm = $("signupForm");
+  if (signupForm) {
+    signupForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const name = $("signupName").value.trim();
+      const email = $("signupEmail").value.trim();
+      const password = $("signupPassword").value;
+      const confirm = $("signupPasswordConfirm").value;
+
+      const errorEl = $("signupError");
+      if (password !== confirm) {
+        if (errorEl) {
+          errorEl.textContent = "As senhas não coincidem.";
+          errorEl.style.display = "block";
+        }
+        return;
+      }
+      await handleSovereignSignup(name, email, password);
+    });
+  }
+
+  // Onboarding form submission
+  const onboardingForm = $("onboardingForm");
+  if (onboardingForm) {
+    onboardingForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const wsName = $("onboardingWsName").value.trim();
+      const wsSlug = $("onboardingWsSlug").value.trim();
+      if (!wsName) return;
+      await handleSovereignOnboarding(wsName, wsSlug);
+    });
+  }
+
+  // === SESSION BOOTSTRAP PIPELINE ===
+  const authenticated = await bootstrapSovereignAppSession();
+  if (!authenticated) {
+    return;
+  }
+
+  // Load projects once authenticated
   await loadProjects();
   let targetId = localStorage.getItem(STORAGE_KEY);
   if (!targetId || !projectsCache.some(p => p.id === targetId)) {

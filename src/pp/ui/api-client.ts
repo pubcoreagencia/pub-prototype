@@ -1,11 +1,16 @@
 // src/pp/ui/api-client.ts
 // Exported helper mirroring internal apiFetch for module imports and automated test suites.
+import { getAccessToken, sovereignFetch } from './sovereign-auth.js';
 
 const HOST_ORIGIN = 'https://pubcore.site';
 const HOST_LOGIN_URL = 'https://pubcore.site/login';
 let activeRefreshPromise: Promise<string | null> | null = null;
 
 export function getAuthToken(): string | undefined {
+  // Sovereign Auth: prioritize in-memory token
+  const sovereignToken = getAccessToken();
+  if (sovereignToken) return sovereignToken;
+
   if (typeof localStorage === 'undefined') {
     return process.env.NODE_ENV === 'test' || process.env.NODE_ENV === 'development' ? 'test-token' : undefined;
   }
@@ -87,6 +92,11 @@ export async function requestTokenRefreshFromHost(oldToken?: string): Promise<st
 }
 
 export async function apiFetch(url: string, opts: RequestInit = {}, isRetry = false): Promise<Response> {
+  // If in-memory sovereign token exists or url is sovereign auth endpoint, route via sovereignFetch
+  if (getAccessToken()) {
+    return sovereignFetch(url, opts, isRetry);
+  }
+
   const headers = new Headers(opts.headers || {});
   const token = getAuthToken();
   if (token && !headers.has('Authorization') && !headers.has('authorization')) {
@@ -106,3 +116,4 @@ export async function apiFetch(url: string, opts: RequestInit = {}, isRetry = fa
 
   return response;
 }
+
