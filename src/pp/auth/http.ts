@@ -277,11 +277,6 @@ export function createSovereignAuthRouter(options: CreateAuthRouterOptions): Rou
       }
 
       // Verify that user is still ACTIVE
-      const userRes = await pool.query('SELECT status FROM users WHERE id = $1', [
-        (await sessionManager.createSession({ userId: 'temp' })).sessionId, // we verify from session
-      ]).catch(() => ({ rows: [] }));
-
-      // Lookup user status for the session
       const sessLookup = await pool.query('SELECT user_id FROM auth_sessions WHERE id = $1', [result.tokens.sessionId]);
       if (sessLookup.rows.length > 0) {
         const u = await pool.query('SELECT status FROM users WHERE id = $1', [sessLookup.rows[0].user_id]);
