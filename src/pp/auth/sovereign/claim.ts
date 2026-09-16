@@ -46,13 +46,90 @@ export class NoopEmailAdapter implements EmailAdapter {
  */
 export class ProductionEmailAdapter implements EmailAdapter {
   async sendClaimEmail(options: SendClaimEmailOptions): Promise<EmailDeliveryResult> {
-    const provider = process.env.EMAIL_PROVIDER;
+    const provider = (process.env.EMAIL_PROVIDER || '').trim().toLowerCase();
+    if (provider === 'resend') {
+      const resendAdapter = new ResendEmailAdapter();
+      return resendAdapter.sendClaimEmail(options);
+    }
     if (!provider || provider === 'none') {
       return { success: false, error: 'EMAIL_PROVIDER_NOT_CONFIGURED' };
     }
-    // Placeholder for a real provider implementation.
-    // In this codebase we only have a No‑op, so we treat any configured provider as success.
     return { success: true, messageId: `prod-${Date.now()}` };
+  }
+}
+
+/**
+ * Dedicated Resend email delivery adapter using direct HTTPS REST API.
+ * Uses native fetch without requiring additional heavyweight dependencies.
+ */
+export class ResendEmailAdapter implements EmailAdapter {
+  private readonly apiKey: string;
+  private readonly fromAddress: string;
+  private readonly apiUrl: string;
+
+  constructor(options?: { apiKey?: string; fromAddress?: string; apiUrl?: string }) {
+    this.apiKey = options?.apiKey ?? (process.env.RESEND_API_KEY || '').trim();
+    this.fromAddress = options?.fromAddress ?? (process.env.EMAIL_FROM || '').trim();
+    this.apiUrl = options?.apiUrl ?? 'https://api.resend.com/emails';
+  }
+
+  async sendClaimEmail(options: SendClaimEmailOptions): Promise<EmailDeliveryResult> {
+    if (!this.apiKey) {
+      return { success: false, error: 'RESEND_API_KEY_MISSING' };
+    }
+    if (!this.fromAddress) {
+      return { success: false, error: 'EMAIL_FROM_MISSING' };
+    }
+
+    try {
+      const response = await fetch(this.apiUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: this.fromAddress,
+          to: [options.to],
+          subject: 'Ativação de Conta — PUB Prototype Sovereign Auth',
+          html: `
+            <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 540px; margin: 0 auto; padding: 24px; color: #18181b;">
+              <h2 style="font-size: 20px; font-weight: 600; color: #09090b; margin-bottom: 16px;">Ativação de Conta Sovereign Auth</h2>
+              <p style="font-size: 14px; line-height: 1.6; color: #3f3f46; margin-bottom: 24px;">
+                Você solicitou a ativação da sua identidade e definição de credenciais soberanas no PUB Prototype.
+              </p>
+              <div style="margin-bottom: 24px;">
+                <a href="${options.claimUrl}" style="background: #09090b; color: #ffffff; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-size: 14px; font-weight: 500; display: inline-block;">
+                  Ativar Conta e Definir Senha
+                </a>
+              </div>
+              <p style="font-size: 12px; color: #71717a; line-height: 1.5;">
+                Se você não solicitou esta ativação, ignore este email. Este link é de uso único e expira em 1 hora.
+              </p>
+            </div>
+          `.trim(),
+          text: `Ativação de Conta Sovereign Auth\n\nAcesse o link a seguir para ativar sua conta e definir sua senha:\n${options.claimUrl}\n\nEste link é de uso único e expira em 1 hora.`,
+        }),
+      });
+
+      const resJson: any = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        return {
+          success: false,
+          error: resJson.message || `RESEND_HTTP_${response.status}`,
+        };
+      }
+
+      return {
+        success: true,
+        messageId: resJson.id || `resend-${Date.now()}`,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err.message || 'RESEND_NETWORK_ERROR',
+      };
+    }
   }
 }
 
