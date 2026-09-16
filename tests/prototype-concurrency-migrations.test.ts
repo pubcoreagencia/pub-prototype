@@ -20,6 +20,7 @@ describe('PUB Prototype â€” Concurrency, Migrations & Preview Error Handlin
         '004_prototype_messages.sql',
         '005_workspaces_projects_and_files.sql',
         '006_prototype_verifications.sql',
+        '007_prototype_correction_attempts.sql',
       ]);
 
       // Check each migration SQL for idempotency constructs
