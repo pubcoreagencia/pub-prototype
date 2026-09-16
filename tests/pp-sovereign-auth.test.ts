@@ -330,7 +330,7 @@ describe('PP Sovereign Auth — Foundation (Phase 1 & Phase 2)', () => {
       const user = await provider.verifyAccessToken(token);
       expect(user).toBeDefined();
       expect(user?.id).toBe('sovereign-user-999');
-      expect(user?.role).toBe('MEMBER');
+      expect(user?.role).toBeUndefined();
     });
   });
 });

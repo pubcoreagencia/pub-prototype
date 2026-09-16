@@ -41,6 +41,7 @@ export class SovereignAuthProvider implements AuthProvider {
     const { claims } = result;
 
     // Return lightweight authenticated user representation
+    // Note: role is intentionally undefined; RBAC is resolved dynamically via workspace_members
     return {
       id: claims.sub,
       email: 'user@pubprototype.internal',
@@ -48,7 +49,6 @@ export class SovereignAuthProvider implements AuthProvider {
       avatarUrl: null,
       createdAt: new Date(claims.iat * 1000),
       updatedAt: new Date(),
-      role: 'MEMBER',
     };
   }
 

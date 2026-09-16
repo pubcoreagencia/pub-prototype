@@ -68,3 +68,15 @@ export function verifyPassword(password: string, storedHash: string): boolean {
     return false;
   }
 }
+
+/**
+ * Checks whether a stored hash matches the current recommended scrypt configuration parameters.
+ * Allows graceful upgrading/rehashing upon successful login.
+ */
+export function needsRehash(storedHash: string): boolean {
+  if (!storedHash || typeof storedHash !== 'string') return true;
+  const parts = storedHash.split('$');
+  if (parts.length !== 5 || parts[1] !== 'scrypt') return true;
+  const expectedParams = `N=${SCRYPT_CONFIG.N},r=${SCRYPT_CONFIG.r},p=${SCRYPT_CONFIG.p}`;
+  return parts[2] !== expectedParams;
+}

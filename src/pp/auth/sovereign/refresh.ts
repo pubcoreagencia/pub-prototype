@@ -137,11 +137,21 @@ export class SovereignSessionManager {
       return { success: false, error: 'EXPIRED' };
     }
 
-    // 3. ATOMIC ROTATION: Revoke current session and create child session
-    await this.pool.query(
-      `UPDATE auth_sessions SET revoked_at = now(), last_active_at = now() WHERE id = $1`,
+    // 3. ATOMIC ROTATION (CAS): Only ONE concurrent caller can update revoked_at from NULL to now().
+    // If rowCount === 0, another request beat us to it -> race condition / reuse detected!
+    const updateRes = await this.pool.query(
+      `UPDATE auth_sessions SET revoked_at = now(), last_active_at = now() WHERE id = $1 AND revoked_at IS NULL`,
       [session.id]
     );
+
+    if (updateRes.rowCount === 0) {
+      await this.revokeFamily(session.familyId);
+      return {
+        success: false,
+        error: 'REUSE_DETECTED',
+        reusedFamilyId: session.familyId,
+      };
+    }
 
     const newTokens = await this.createSession({
       userId: session.userId,
