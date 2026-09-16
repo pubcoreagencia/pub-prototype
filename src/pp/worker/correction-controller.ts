@@ -3,6 +3,31 @@ import type { AgentProvider, ProviderTaskResult } from '../../providers/types.js
 import type { PrototypeEventPublisher } from '../events/events.js';
 import { TaskFinalizer, type WorkspaceSnapshot } from '../../finalizer.js';
 
+export interface FinalizeResultSummary {
+  status: 'COMPLETED' | 'FAILED';
+  commitSha: string | null;
+  commitMessage: string | null;
+  changedFiles: string[];
+  gitStatus: string;
+  testsPassed: boolean | null;
+  testOutput: string;
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+
+export type CorrectionLoopDecision = 'SUCCESS' | 'ESCALATED';
+
+export class CorrectionLoopResult extends String {
+  readonly decision: CorrectionLoopDecision;
+  readonly finalResult?: FinalizeResultSummary;
+
+  constructor(decision: CorrectionLoopDecision, finalResult?: FinalizeResultSummary) {
+    super(decision);
+    this.decision = decision;
+    this.finalResult = finalResult;
+  }
+}
+
 /**
  * Orchestrates in‑process correction attempts when a task finalization fails.
  *
@@ -17,6 +42,7 @@ export class CorrectionController {
   static readonly MAX_CORRECTION_ATTEMPTS = 2;
 
   private attempt = 0;
+  public lastFinalizeResult?: FinalizeResultSummary;
 
   constructor(private readonly provider: AgentProvider, private readonly events: PrototypeEventPublisher) {}
 
@@ -62,7 +88,7 @@ export class CorrectionController {
    * @param baseline Snapshot captured before the first provider execution.
    * @param providerResult Result of the initial provider run (unused except for logging).
    * @param finalizeResult Result of the initial finalizer run that indicated failure.
-   * @returns 'SUCCESS' if a correction succeeded, otherwise 'ESCALATED'.
+   * @returns CorrectionLoopResult with decision and finalResult.
    */
   async runCorrectionLoop(
     task: PrototypeTask | any,
@@ -113,6 +139,7 @@ export class CorrectionController {
       });
 
       if (newFinalize.status === 'COMPLETED') {
+        this.lastFinalizeResult = newFinalize;
         await this.events.emit({
           sessionId: task.prototypeSessionId!,
           type: 'correction_succeeded',
@@ -148,6 +175,7 @@ export class CorrectionController {
       }
 
       // Escalation path (no more attempts or non‑correctable error)
+      this.lastFinalizeResult = newFinalize;
       await this.events.emit({
         sessionId: task.prototypeSessionId!,
         type: 'correction_escalated',
@@ -161,6 +189,17 @@ export class CorrectionController {
     }
 
     // Exhausted attempts – final escalation
+    this.lastFinalizeResult = {
+      status: lastFinalize.status,
+      commitSha: null,
+      commitMessage: null,
+      changedFiles: lastFinalize.changedFiles,
+      gitStatus: lastFinalize.gitStatus,
+      testsPassed: null,
+      testOutput: lastFinalize.testOutput,
+      errorCode: lastFinalize.errorCode,
+      errorMessage: lastFinalize.errorMessage,
+    };
     await this.events.emit({
       sessionId: task.prototypeSessionId!,
       type: 'correction_escalated',
