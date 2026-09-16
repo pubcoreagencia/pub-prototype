@@ -87,6 +87,33 @@ export const createPpApp = (
     next();
   });
 
+  // CORS middleware for authorized origins (https://pubcore.site and local dev)
+  const allowedOrigins = new Set([
+    'https://pubcore.site',
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'http://localhost:5173',
+  ]);
+
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin && allowedOrigins.has(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, x-auth-token, x-request-id');
+      res.setHeader('Access-Control-Max-Age', '86400');
+    }
+
+    if (req.method === 'OPTIONS') {
+      if (origin && allowedOrigins.has(origin)) {
+        return res.sendStatus(204);
+      }
+      return res.sendStatus(403);
+    }
+    next();
+  });
+
   app.use(express.json());
 
   // API Rate Limiting for sensitive endpoints
