@@ -17,6 +17,8 @@ import type {
   CheckpointFile,
   PrototypeVerification,
   VerificationEvidence,
+  PrototypeCorrectionAttempt,
+  CreateCorrectionAttemptInput,
 } from '../domain/domain.js';
 
 const mapSession = (r: Record<string, unknown>): PrototypeSession => ({
@@ -54,6 +56,25 @@ const mapVerification = (r: Record<string, unknown>): PrototypeVerification => (
   finishedAt: (r.finished_at as Date) || null,
   durationMs: (r.duration_ms as number) ?? null,
   createdAt: r.created_at as Date,
+});
+
+const mapCorrectionAttempt = (r: Record<string, unknown>): PrototypeCorrectionAttempt => ({
+  id: r.id as string,
+  sessionId: r.session_id as string,
+  taskId: r.task_id as string,
+  sourceVerificationId: r.source_verification_id as string,
+  sourceCheckpointId: r.source_checkpoint_id as string,
+  attemptNumber: Number(r.attempt_number),
+  status: r.status as any,
+  resultCommitSha: (r.result_commit_sha as string) || null,
+  resultCheckpointId: (r.result_checkpoint_id as string) || null,
+  resultVerificationId: (r.result_verification_id as string) || null,
+  failureEvidence: (typeof r.failure_evidence === 'string' ? JSON.parse(r.failure_evidence) : r.failure_evidence) || {},
+  error: (r.error as string) || null,
+  startedAt: r.started_at as Date,
+  finishedAt: (r.finished_at as Date) || null,
+  createdAt: r.created_at as Date,
+  updatedAt: r.updated_at as Date,
 });
 
 const mapProject = (r: Record<string, unknown>): Project => ({
@@ -151,6 +172,13 @@ export interface PrototypeRepository {
   listVerifications(sessionId: string): Promise<PrototypeVerification[]>;
   compareAndPromoteSession(sessionId: string, expectedCurrentCheckpointSha: string | null, targetCheckpoint: PrototypeCheckpoint, previewUrl: string, previewRuntime?: string): Promise<PrototypeSession | null>;
 
+  // PP 2.1 Autonomous Verification Recovery Loop
+  createCorrectionAttempt(input: CreateCorrectionAttemptInput): Promise<PrototypeCorrectionAttempt | null>;
+  updateCorrectionAttempt(id: string, patch: Partial<Pick<PrototypeCorrectionAttempt, 'status' | 'resultCommitSha' | 'resultCheckpointId' | 'resultVerificationId' | 'error' | 'finishedAt'>>): Promise<PrototypeCorrectionAttempt | null>;
+  getCorrectionAttempt(id: string): Promise<PrototypeCorrectionAttempt | null>;
+  listCorrectionAttempts(sessionId: string): Promise<PrototypeCorrectionAttempt[]>;
+  getCorrectionAttemptsForVerification(sourceVerificationId: string): Promise<PrototypeCorrectionAttempt[]>;
+
   initializeSchema(): Promise<void>;
 }
 
@@ -169,6 +197,7 @@ const fallbackPromotions = new Map<string, PrototypePromotion>();
 const fallbackMessages = new Map<string, PrototypeMessage[]>();
 const fallbackCheckpointFiles = new Map<string, CheckpointFile[]>();
 const fallbackVerifications = new Map<string, PrototypeVerification[]>();
+const fallbackCorrectionAttempts = new Map<string, PrototypeCorrectionAttempt[]>();
 const fallbackWorkspaceMembers = new Map<string, Map<string, WorkspaceRole>>([
       [DEFAULT_WORKSPACE_ID,
         new Map<string, WorkspaceRole>([
@@ -1227,6 +1256,207 @@ export class PostgresPrototypeRepository implements PrototypeRepository {
     return updated;
   }
 
+  // === PP 2.1: AUTONOMOUS VERIFICATION RECOVERY METHODS ===
+
+  async createCorrectionAttempt(input: CreateCorrectionAttemptInput): Promise<PrototypeCorrectionAttempt | null> {
+    const id = randomUUID();
+    try {
+      const r = await this.pool.query(
+        `INSERT INTO prototype_correction_attempts 
+         (id, session_id, task_id, source_verification_id, source_checkpoint_id, attempt_number, status, failure_evidence, started_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'RUNNING', $7, now())
+         ON CONFLICT (source_verification_id, attempt_number) DO NOTHING
+         RETURNING *`,
+        [
+          id,
+          input.sessionId,
+          input.taskId,
+          input.sourceVerificationId,
+          input.sourceCheckpointId,
+          input.attemptNumber,
+          JSON.stringify(input.failureEvidence || {}),
+        ]
+      );
+      if (r?.rows?.[0]) {
+        const attempt = mapCorrectionAttempt(r.rows[0]);
+        const list = fallbackCorrectionAttempts.get(input.sessionId) || [];
+        list.unshift(attempt);
+        fallbackCorrectionAttempts.set(input.sessionId, list);
+        return attempt;
+      }
+      if (r?.rowCount === 0) {
+        // Concurrency conflict: another process already claimed this attempt number for this verification
+        return null;
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] DB quota/error on createCorrectionAttempt:', err.message);
+    }
+
+    // In-memory fallback
+    const list = fallbackCorrectionAttempts.get(input.sessionId) || [];
+    const conflict = list.find(
+      a => a.sourceVerificationId === input.sourceVerificationId && a.attemptNumber === input.attemptNumber
+    );
+    if (conflict) {
+      return null;
+    }
+
+    const now = new Date();
+    const attempt: PrototypeCorrectionAttempt = {
+      id,
+      sessionId: input.sessionId,
+      taskId: input.taskId,
+      sourceVerificationId: input.sourceVerificationId,
+      sourceCheckpointId: input.sourceCheckpointId,
+      attemptNumber: input.attemptNumber,
+      status: 'RUNNING',
+      resultCommitSha: null,
+      resultCheckpointId: null,
+      resultVerificationId: null,
+      failureEvidence: input.failureEvidence || {},
+      error: null,
+      startedAt: now,
+      finishedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    list.unshift(attempt);
+    fallbackCorrectionAttempts.set(input.sessionId, list);
+    return attempt;
+  }
+
+  async updateCorrectionAttempt(
+    id: string,
+    patch: Partial<Pick<PrototypeCorrectionAttempt, 'status' | 'resultCommitSha' | 'resultCheckpointId' | 'resultVerificationId' | 'error' | 'finishedAt'>>
+  ): Promise<PrototypeCorrectionAttempt | null> {
+    try {
+      const sets: string[] = ['updated_at = now()'];
+      const values: any[] = [];
+      let idx = 1;
+
+      if (patch.status !== undefined) {
+        sets.push(`status = $${idx++}`);
+        values.push(patch.status);
+      }
+      if (patch.resultCommitSha !== undefined) {
+        sets.push(`result_commit_sha = $${idx++}`);
+        values.push(patch.resultCommitSha);
+      }
+      if (patch.resultCheckpointId !== undefined) {
+        sets.push(`result_checkpoint_id = $${idx++}`);
+        values.push(patch.resultCheckpointId);
+      }
+      if (patch.resultVerificationId !== undefined) {
+        sets.push(`result_verification_id = $${idx++}`);
+        values.push(patch.resultVerificationId);
+      }
+      if (patch.error !== undefined) {
+        sets.push(`error = $${idx++}`);
+        values.push(patch.error);
+      }
+      if (patch.finishedAt !== undefined) {
+        sets.push(`finished_at = $${idx++}`);
+        values.push(patch.finishedAt);
+      }
+
+      values.push(id);
+      const r = await this.pool.query(
+        `UPDATE prototype_correction_attempts SET ${sets.join(', ')} WHERE id = $${idx} RETURNING *`,
+        values
+      );
+      if (r?.rows?.[0]) {
+        const attempt = mapCorrectionAttempt(r.rows[0]);
+        for (const [sid, list] of fallbackCorrectionAttempts.entries()) {
+          const itemIdx = list.findIndex(a => a.id === id);
+          if (itemIdx >= 0) {
+            list[itemIdx] = attempt;
+            fallbackCorrectionAttempts.set(sid, list);
+            break;
+          }
+        }
+        return attempt;
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] DB quota/error on updateCorrectionAttempt:', err.message);
+    }
+
+    // In-memory fallback
+    for (const [sid, list] of fallbackCorrectionAttempts.entries()) {
+      const itemIdx = list.findIndex(a => a.id === id);
+      if (itemIdx >= 0) {
+        const updated: PrototypeCorrectionAttempt = {
+          ...list[itemIdx],
+          ...patch,
+          updatedAt: new Date(),
+        };
+        list[itemIdx] = updated;
+        fallbackCorrectionAttempts.set(sid, list);
+        return updated;
+      }
+    }
+    return null;
+  }
+
+  async getCorrectionAttempt(id: string): Promise<PrototypeCorrectionAttempt | null> {
+    try {
+      const r = await this.pool.query(
+        `SELECT * FROM prototype_correction_attempts WHERE id = $1`,
+        [id]
+      );
+      if (r?.rows?.[0]) {
+        return mapCorrectionAttempt(r.rows[0]);
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] DB quota/error on getCorrectionAttempt:', err.message);
+    }
+
+    for (const list of fallbackCorrectionAttempts.values()) {
+      const found = list.find(a => a.id === id);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  async listCorrectionAttempts(sessionId: string): Promise<PrototypeCorrectionAttempt[]> {
+    try {
+      const r = await this.pool.query(
+        `SELECT * FROM prototype_correction_attempts WHERE session_id = $1 ORDER BY created_at DESC`,
+        [sessionId]
+      );
+      if (r?.rows) {
+        return r.rows.map(mapCorrectionAttempt);
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] DB quota/error on listCorrectionAttempts:', err.message);
+    }
+
+    return fallbackCorrectionAttempts.get(sessionId) || [];
+  }
+
+  async getCorrectionAttemptsForVerification(sourceVerificationId: string): Promise<PrototypeCorrectionAttempt[]> {
+    try {
+      const r = await this.pool.query(
+        `SELECT * FROM prototype_correction_attempts WHERE source_verification_id = $1 ORDER BY attempt_number ASC`,
+        [sourceVerificationId]
+      );
+      if (r?.rows) {
+        return r.rows.map(mapCorrectionAttempt);
+      }
+    } catch (err: any) {
+      console.warn('[PostgresPrototypeRepository] DB quota/error on getCorrectionAttemptsForVerification:', err.message);
+    }
+
+    const matches: PrototypeCorrectionAttempt[] = [];
+    for (const list of fallbackCorrectionAttempts.values()) {
+      for (const a of list) {
+        if (a.sourceVerificationId === sourceVerificationId) {
+          matches.push(a);
+        }
+      }
+    }
+    return matches.sort((a, b) => a.attemptNumber - b.attemptNumber);
+  }
+
   async initializeSchema(): Promise<void> {
     try {
       await this.pool.query(`
@@ -1295,6 +1525,30 @@ export class PostgresPrototypeRepository implements PrototypeRepository {
         CREATE INDEX IF NOT EXISTS prototype_verifications_checkpoint_idx ON prototype_verifications(checkpoint_id);
         CREATE INDEX IF NOT EXISTS prototype_verifications_commit_idx ON prototype_verifications(commit_sha);
         CREATE INDEX IF NOT EXISTS prototype_verifications_status_idx ON prototype_verifications(status);
+
+        CREATE TABLE IF NOT EXISTS prototype_correction_attempts (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          session_id UUID NOT NULL REFERENCES prototype_sessions(id) ON DELETE RESTRICT,
+          task_id UUID NOT NULL REFERENCES prototype_tasks(id) ON DELETE CASCADE,
+          source_verification_id UUID NOT NULL REFERENCES prototype_verifications(id) ON DELETE RESTRICT,
+          source_checkpoint_id UUID NOT NULL REFERENCES prototype_checkpoints(id) ON DELETE RESTRICT,
+          attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
+          status TEXT NOT NULL DEFAULT 'RUNNING' CHECK (status IN ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'ESCALATED')),
+          result_commit_sha TEXT,
+          result_checkpoint_id UUID REFERENCES prototype_checkpoints(id) ON DELETE SET NULL,
+          result_verification_id UUID REFERENCES prototype_verifications(id) ON DELETE SET NULL,
+          failure_evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+          error TEXT,
+          started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          finished_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          CONSTRAINT uq_source_verification_attempt UNIQUE (source_verification_id, attempt_number)
+        );
+        CREATE INDEX IF NOT EXISTS prototype_correction_attempts_session_idx ON prototype_correction_attempts(session_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS prototype_correction_attempts_source_verif_idx ON prototype_correction_attempts(source_verification_id);
+        CREATE INDEX IF NOT EXISTS prototype_correction_attempts_result_cp_idx ON prototype_correction_attempts(result_checkpoint_id);
+        CREATE INDEX IF NOT EXISTS prototype_correction_attempts_status_idx ON prototype_correction_attempts(status);
 
         CREATE OR REPLACE FUNCTION prevent_verification_mutation()
         RETURNS TRIGGER AS $$
