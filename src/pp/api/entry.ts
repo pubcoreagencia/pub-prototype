@@ -22,6 +22,8 @@ import { HttpPdlTaskIngestionPort, FailClosedPdlTaskIngestionPort } from '../han
 import { PreviewRecoveryService } from '../preview/preview-recovery.js';
 import { AuthService } from '../auth/auth.js';
 import { VerificationGate } from '../verification/verification-gate.js';
+import { createSovereignAuthRouter } from '../auth/http.js';
+import { getAuthProvider } from '../auth/factory.js';
 
 export const createPpApp = (
   pool?: Pool,
@@ -32,7 +34,8 @@ export const createPpApp = (
   const activePool = pool ?? new Pool({ connectionString: process.env.DATABASE_URL });
   const taskRepo = tasks ?? new PostgresPpTaskRepository(activePool);
   const protoRepo = prototypes ?? new PostgresPrototypeRepository(activePool);
-  const authService = new AuthService(protoRepo);
+  const activeAuthProvider = getAuthProvider({ pool: activePool });
+  const authService = new AuthService(protoRepo, activeAuthProvider);
   const previewRecovery = new PreviewRecoveryService(protoRepo);
   const verificationGate = new VerificationGate(protoRepo);
   if (typeof protoRepo.initializeSchema === 'function') {
@@ -99,6 +102,7 @@ export const createPpApp = (
     const origin = req.headers.origin;
     if (origin && allowedOrigins.has(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.setHeader('Vary', 'Origin');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, x-auth-token, x-request-id');
@@ -589,7 +593,11 @@ export const createPpApp = (
     }
   });
 
-  // Auth API
+  // Sovereign Auth HTTP Contract (Phase 3)
+  const sovereignAuthRouter = createSovereignAuthRouter({ pool: activePool, protoRepo });
+  app.use('/prototype/auth', sovereignAuthRouter);
+
+  // Legacy / Transitional Auth API (Supabase / local dev fallback)
   app.get('/api/auth/me', async (req, res) => {
     const user = await authService.verifyToken(req.headers.authorization);
     return res.json({ user, supabaseConfigured: authService.isSupabaseConfigured() });

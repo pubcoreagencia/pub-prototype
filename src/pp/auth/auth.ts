@@ -3,6 +3,8 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import type { User, WorkspaceRole } from '../domain/domain.js';
 import { PostgresPrototypeRepository } from '../persistence/repository.js';
 
+import type { AuthProvider } from './provider.js';
+
 export const ROLE_HIERARCHY: Record<WorkspaceRole, number> = {
   OWNER: 4,
   ADMIN: 3,
@@ -24,6 +26,7 @@ declare global {
 
 export class AuthService {
   private supabase: SupabaseClient | null = null;
+  private authProvider?: AuthProvider;
   private defaultUser: AuthenticatedUser = {
     id: '00000000-0000-0000-0000-000000000001',
     email: 'dev@pubprototype.local',
@@ -34,7 +37,8 @@ export class AuthService {
     role: 'OWNER',
   };
 
-  constructor(private readonly protoRepo?: PostgresPrototypeRepository) {
+  constructor(private readonly protoRepo?: PostgresPrototypeRepository, authProvider?: AuthProvider) {
+    this.authProvider = authProvider;
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
     if (supabaseUrl && supabaseAnonKey) {
@@ -78,6 +82,10 @@ export class AuthService {
         email: cleanToken === 'test-token' ? 'dev@pubprototype.local' : cleanToken === 'user-b-id' ? 'userb@pubprototype.local' : cleanToken === 'viewer-user-id' ? 'viewer@pubprototype.local' : this.defaultUser.email,
         name: cleanToken === 'test-token' ? 'Default Developer' : cleanToken === 'user-b-id' ? 'User B' : cleanToken === 'viewer-user-id' ? 'Viewer User' : this.defaultUser.name,
       };
+    }
+
+    if (this.authProvider && this.authProvider.isConfigured()) {
+      return this.authProvider.verifyAccessToken(cleanToken);
     }
 
     if (this.supabase) {
