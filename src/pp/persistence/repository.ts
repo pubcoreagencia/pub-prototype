@@ -1602,6 +1602,29 @@ export class PostgresPrototypeRepository implements PrototypeRepository {
           FROM projects p
           WHERE s.project_id IS NULL AND s.project = p.name AND p.workspace_id = v_default_workspace_id;
         END $$;
+
+        -- Sovereign Auth Migration (008)
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'ACTIVE';
+
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          refresh_token_hash TEXT NOT NULL,
+          user_agent TEXT,
+          ip_address INET,
+          expires_at TIMESTAMPTZ NOT NULL,
+          revoked_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          last_active_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          family_id UUID NOT NULL,
+          rotated_from UUID REFERENCES auth_sessions(id) ON DELETE SET NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS auth_sessions_user_idx ON auth_sessions(user_id);
+        CREATE INDEX IF NOT EXISTS auth_sessions_refresh_hash_idx ON auth_sessions(refresh_token_hash);
+        CREATE INDEX IF NOT EXISTS auth_sessions_family_idx ON auth_sessions(family_id);
+        CREATE INDEX IF NOT EXISTS auth_sessions_expires_revoked_idx ON auth_sessions(expires_at, revoked_at);
       `);
       console.log('[PostgresPrototypeRepository] Schema initialized successfully');
     } catch (err: any) {
