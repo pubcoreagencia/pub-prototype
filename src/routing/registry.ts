@@ -86,7 +86,7 @@ export const MODEL_REGISTRY: ModelCapabilityDefinition[] = [
     notes: 'Dynamic free router pool across available community endpoints',
   },
 
-  // --- TIER 3: GUARDED PAID FALLBACK MODELS ---
+  // --- HISTORICAL PAID MODELS (PERMANENTLY DISABLED IN PP: 100% FREE ONLY) ---
   {
     model: 'openai/gpt-4o-mini',
     profiles: ['coding', 'reasoning', 'fast_prototype', 'general'],
@@ -95,9 +95,9 @@ export const MODEL_REGISTRY: ModelCapabilityDefinition[] = [
     toolCalling: true,
     systemPrompt: true,
     contextWindow: 128000,
-    enabled: true,
+    enabled: false, // PERMANENTLY DISABLED: PP is strictly 100% FREE
     vendor: 'openai',
-    notes: 'Guarded paid fallback with high tool reliability and low token cost',
+    notes: 'Paid model permanently forbidden in PP production',
   },
   {
     model: 'anthropic/claude-3.5-haiku',
@@ -107,9 +107,9 @@ export const MODEL_REGISTRY: ModelCapabilityDefinition[] = [
     toolCalling: true,
     systemPrompt: true,
     contextWindow: 200000,
-    enabled: true,
+    enabled: false, // PERMANENTLY DISABLED: PP is strictly 100% FREE
     vendor: 'anthropic',
-    notes: 'High speed and precision reasoning fallback',
+    notes: 'Paid model permanently forbidden in PP production',
   },
   {
     model: 'deepseek/deepseek-chat',
@@ -119,11 +119,12 @@ export const MODEL_REGISTRY: ModelCapabilityDefinition[] = [
     toolCalling: true,
     systemPrompt: true,
     contextWindow: 64000,
-    enabled: true,
+    enabled: false, // PERMANENTLY DISABLED: PP is strictly 100% FREE
     vendor: 'deepseek',
-    notes: 'Cost-effective code generation fallback',
+    notes: 'Paid model permanently forbidden in PP production',
   },
 ];
+
 
 /**
  * Find model capabilities by identifier.

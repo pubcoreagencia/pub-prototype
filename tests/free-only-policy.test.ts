@@ -59,6 +59,25 @@ describe('PP Free-Only Policy Enforcement', () => {
       }
     });
 
+    it('proves that no environment variable or escape hatch can enable paid fallback', () => {
+      const hostileEnv = {
+        OPENROUTER_API_KEY: 'sk-test',
+        OPENROUTER_PAID_FALLBACK_ENABLED: 'true',
+        PP_ALLOW_PAID_MODELS: 'true',
+        OPENROUTER_PAID_MODELS: 'openai/gpt-4o-mini,anthropic/claude-3.5-haiku',
+        OPENROUTER_PAID_MAX_ATTEMPTS: '5',
+      } as any;
+
+      const policy = buildRoutingPolicy({ prompt: 'Test' }, hostileEnv, 'coding');
+      expect(policy.tiers.tier3PaidFallback).toEqual([]);
+      expect(policy.limits.maxPaidAttempts).toBe(0);
+
+      const candidates = resolveCandidateModels(policy, undefined, hostileEnv);
+      expect(candidates.every(c => c.free && isFreeModel(c.model))).toBe(true);
+      expect(candidates.map(c => c.model)).not.toContain('openai/gpt-4o-mini');
+    });
+
+
     it('filters out paid models if present in OPENROUTER_FALLBACK_MODELS', () => {
       const env = {
         OPENROUTER_FALLBACK_MODELS: 'cohere/north-mini-code:free,openai/gpt-4o-mini,openrouter/free',

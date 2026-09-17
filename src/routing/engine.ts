@@ -63,24 +63,14 @@ export function buildRoutingPolicy(
   // Tier 2: OpenRouter Free Pool ('openrouter/free') as safety net
   const tier2OpenRouterFreePool = env.OPENROUTER_FREE_POOL_ENABLED !== 'false';
 
-  // Tier 3: Paid Fallback is FORBIDDEN by PP policy (100% FREE).
-  // Account balance serves only to remove daily request limits, never for paid model execution.
-  const paidEnabled = env.OPENROUTER_PAID_FALLBACK_ENABLED === 'true' && env.PP_ALLOW_PAID_MODELS === 'true';
-  const envTier3 = env.OPENROUTER_PAID_MODELS?.trim();
-  let tier3PaidFallback: string[] = [];
-  if (paidEnabled) {
-    if (envTier3) {
-      tier3PaidFallback = envTier3.split(',').map(s => s.trim()).filter(Boolean);
-    } else {
-      tier3PaidFallback = [...DEFAULT_PAID_MODELS];
-    }
-  }
+  // Tier 3: Paid Fallback is PERMANENTLY FORBIDDEN by PP policy (100% FREE ONLY).
+  // There is NO environment flag, feature flag, or configuration that can enable paid execution.
+  // Account balance serves exclusively to remove daily request limits upstream.
+  const tier3PaidFallback: string[] = [];
 
   const maxRetriesPerModel = Math.max(1, Number(env.OPENROUTER_MAX_RETRIES ?? 2));
-  const maxPaidAttempts = paidEnabled ? Math.max(0, Number(env.OPENROUTER_PAID_MAX_ATTEMPTS ?? 1)) : 0;
-  const maxCostPerTaskUsd = env.OPENROUTER_MAX_COST_PER_TASK_USD
-    ? Number(env.OPENROUTER_MAX_COST_PER_TASK_USD)
-    : 0;
+  const maxPaidAttempts = 0; // Strictly 0: No paid attempts are ever permitted
+  const maxCostPerTaskUsd = 0; // Strictly 0: Budget for paid models is permanently $0.00
   const baseDelayMs = Math.max(0, Number(env.OPENROUTER_RETRY_BASE_DELAY_MS ?? 500));
   const minContextTokens = Number(env.OPENROUTER_MIN_CONTEXT_TOKENS ?? 32768);
 
@@ -103,6 +93,7 @@ export function buildRoutingPolicy(
     },
   };
 }
+
 
 /**
  * Resolve concrete candidate models in priority sequence based on policy.
@@ -207,20 +198,12 @@ export function resolveCandidateModels(
  * 3. Accumulated spent cost + current estimated cost remaining within maxCostPerTaskUsd budget
  */
 export function canUsePaidFallback(
-  policy: ModelRoutingPolicy,
-  currentPaidAttemptsUsed: number,
-  accumulatedCostUsd: number = 0,
-  nextEstimatedCostUsd?: number
+  _policy?: ModelRoutingPolicy,
+  _currentPaidAttemptsUsed?: number,
+  _accumulatedCostUsd: number = 0,
+  _nextEstimatedCostUsd?: number
 ): boolean {
-  if (policy.tiers.tier3PaidFallback.length === 0) return false;
-  if (currentPaidAttemptsUsed >= policy.limits.maxPaidAttempts) return false;
-
-  const totalProjectedCost = accumulatedCostUsd + (nextEstimatedCostUsd ?? 0);
-  if (
-    policy.limits.maxCostPerTaskUsd !== undefined &&
-    totalProjectedCost > policy.limits.maxCostPerTaskUsd
-  ) {
-    return false;
-  }
-  return true;
+  // PP is permanently 100% FREE. Paid fallback is unconditionally disallowed.
+  return false;
 }
+
