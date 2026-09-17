@@ -187,7 +187,8 @@ export class ClaimManager {
       this.emailAdapter = new NoopEmailAdapter();
     }
     this.tokenTtlMs = options.tokenTtlMs ?? 60 * 60 * 1000; // 1 hour default
-    this.claimBaseUrl = options.claimBaseUrl ?? 'https://pubprototype.internal/claim';
+    const appUrl = (process.env.PUBLIC_APP_URL || process.env.APP_URL || 'https://api.pubcore.site').trim().replace(/\/+$/, '');
+    this.claimBaseUrl = options.claimBaseUrl ?? `${appUrl}/prototype/claim`;
   }
 
   /**

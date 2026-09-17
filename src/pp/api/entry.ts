@@ -13,6 +13,7 @@ import { PostgresPrototypeRepository } from '../persistence/repository.js';
 import { PrototypeEventStream, PostgresPrototypeEventBridge } from '../events/events.js';
 import { PrototypeSseBroker } from '../events/sse.js';
 import { prototypeUiHtml } from '../ui/ui.js';
+import { claimUiHtml } from '../ui/claim-ui.js';
 import { prototypeHistoryUiScript } from '../ui/history-ui.js';
 import { PrototypeComparisonPreviewManager } from '../preview/comparison-preview.js';
 import { LocalPreviewRuntime } from '../preview/local-preview-runtime.js';
@@ -166,6 +167,11 @@ export const createPpApp = (
   // UI do Prototype
   app.get(['/prototype', '/prototype/sessions/:id/view'], (_req, res) => {
     res.status(200).type('html').send(prototypeUiHtml() + prototypeHistoryUiScript());
+  });
+
+  // UI de Claim / Ativação de Conta Soberana
+  app.get('/prototype/claim', (_req, res) => {
+    res.status(200).type('html').send(claimUiHtml());
   });
 
   // POST /prototype/sessions

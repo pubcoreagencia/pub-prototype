@@ -497,9 +497,11 @@ export function createSovereignAuthRouter(options: CreateAuthRouterOptions): Rou
     legacyHeaders: false,
   });
 
+  const claimBaseUrl = (process.env.PUBLIC_APP_URL || process.env.APP_URL || 'https://api.pubcore.site').trim().replace(/\/+$/, '') + '/prototype/claim';
   const claimManager = options.claimManager ?? new ClaimManager({
     pool,
     emailAdapter: options.emailAdapter,
+    claimBaseUrl,
   });
 
   // POST /prototype/auth/claim/request
