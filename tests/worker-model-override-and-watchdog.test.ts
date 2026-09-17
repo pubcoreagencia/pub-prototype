@@ -83,7 +83,7 @@ describe('PrototypeWorker – Model Override & Streaming Watchdog', () => {
       async execute(task: ProviderTaskInput, ws, options): Promise<ProviderTaskResult> {
         modelsReceivedByProvider.push(task.modelOverride || 'none');
 
-        if (task.modelOverride === 'minimax/minimax-m2.7:free') {
+        if (task.modelOverride === 'cohere/north-mini-code:free') {
           // Candidate 1: completely silent, stalls until abort (simulates idle timeout)
           return new Promise((resolve) => {
             options?.signal?.addEventListener('abort', () => {
@@ -132,7 +132,7 @@ describe('PrototypeWorker – Model Override & Streaming Watchdog', () => {
     const task = await taskRepo.get(taskId);
     expect(task.status).toBe('COMPLETED');
     // Verifies candidate 1 was received first, then candidate 2 was passed to provider
-    expect(modelsReceivedByProvider[0]).toBe('minimax/minimax-m2.7:free');
-    expect(modelsReceivedByProvider[1]).toBe('poolside/laguna-s-2.1-20260720:free');
+    expect(modelsReceivedByProvider[0]).toBe('cohere/north-mini-code:free');
+    expect(modelsReceivedByProvider[1]).toBe('nex-agi/nex-n2.5-pro:free');
   });
 });

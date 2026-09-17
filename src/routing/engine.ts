@@ -12,24 +12,35 @@ import type { SystemObservabilityReport } from './observability.js';
 
 /**
  * Default Curated Tier 1 Free models per task profile.
+ * Maintained with high-availability verified models.
  */
 export const DEFAULT_TIER1_MODELS: Record<TaskRoutingProfile, string[]> = {
   coding: [
-    'minimax/minimax-m2.7:free',
-    'poolside/laguna-s-2.1-20260720:free',
     'cohere/north-mini-code:free',
+    'nex-agi/nex-n2.5-pro:free',
+    'qwen/qwen3.8-27b:free',
+    'nvidia/nemotron-3-super-120b-a12b:free',
+    'nex-agi/nex-n2.5-mini:free',
+    'z-ai/glm-5.2:free',
   ],
   reasoning: [
-    'minimax/minimax-m3:free',
     'nvidia/nemotron-3-ultra-550b-a55b:free',
+    'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+    'qwen/qwen3.8-27b:free',
+    'nex-agi/nex-n2.5-pro:free',
+    'z-ai/glm-5.2:free',
   ],
   fast_prototype: [
     'cohere/north-mini-code:free',
-    'minimax/minimax-m2.7:free',
+    'nex-agi/nex-n2.5-mini:free',
+    'nex-agi/nex-n2.5-pro:free',
+    'liquid/lfm-2.5-2.6b:free',
   ],
   general: [
-    'minimax/minimax-m2.7:free',
-    'minimax/minimax-m3:free',
+    'cohere/north-mini-code:free',
+    'nex-agi/nex-n2.5-pro:free',
+    'qwen/qwen3.8-27b:free',
+    'nvidia/nemotron-3-super-120b-a12b:free',
   ],
 };
 
@@ -64,8 +75,6 @@ export function buildRoutingPolicy(
   const tier2OpenRouterFreePool = env.OPENROUTER_FREE_POOL_ENABLED !== 'false';
 
   // Tier 3: Paid Fallback is PERMANENTLY FORBIDDEN by PP policy (100% FREE ONLY).
-  // There is NO environment flag, feature flag, or configuration that can enable paid execution.
-  // Account balance serves exclusively to remove daily request limits upstream.
   const tier3PaidFallback: string[] = [];
 
   const maxRetriesPerModel = Math.max(1, Number(env.OPENROUTER_MAX_RETRIES ?? 2));
@@ -94,7 +103,6 @@ export function buildRoutingPolicy(
   };
 }
 
-
 /**
  * Resolve concrete candidate models in priority sequence based on policy.
  *
@@ -113,7 +121,6 @@ export function resolveCandidateModels(
   // If a specific explicit model override is requested, enforce that it is FREE
   const explicitModel = legacyModelOverride || (env.OPENROUTER_MODEL && env.OPENROUTER_MODEL !== 'openrouter/free' ? env.OPENROUTER_MODEL : undefined);
   if (explicitModel && explicitModel !== 'openrouter/free') {
-    // SECURITY GATE: Only accept explicit model override if it is a FREE model!
     if (!isFreeModel(explicitModel)) {
       console.warn(`[RoutingPolicy] Rejected paid model override '${explicitModel}': PP execution is strictly 100% FREE.`);
     } else {
@@ -126,7 +133,6 @@ export function resolveCandidateModels(
         },
       ];
 
-      // Also append legacy OPENROUTER_FALLBACK_MODELS if provided and FREE
       const fallbackRaw = env.OPENROUTER_FALLBACK_MODELS?.trim();
       if (fallbackRaw) {
         const extraFallbacks = fallbackRaw.split(',').map(s => s.trim()).filter(Boolean);
@@ -146,10 +152,9 @@ export function resolveCandidateModels(
     }
   }
 
-
   const candidates: CandidateModelEntry[] = [];
 
-  // 1. Tier 1: Filtered curated free models (Safe Empirical Calibration applied if enabled)
+  // 1. Tier 1: Filtered curated free models
   const capableTier1 = filterCapableModels(policy.tiers.tier1ExplicitFree, {
     requireToolCalling: policy.capabilities.requireToolCalling,
     minContextTokens: policy.capabilities.minContextTokens,
@@ -185,25 +190,14 @@ export function resolveCandidateModels(
     });
   }
 
-  // Final Safety Gate: Guarantee that all candidates returned are strictly FREE models
   return candidates.filter(c => c.free && isFreeModel(c.model));
 }
 
-
-/**
- * Budget and Paid Fallback Guard.
- * Evaluates whether a paid attempt is permitted based on:
- * 1. Tier 3 paid models being configured and enabled
- * 2. Total paid attempts executed so far being below maxPaidAttempts limit
- * 3. Accumulated spent cost + current estimated cost remaining within maxCostPerTaskUsd budget
- */
 export function canUsePaidFallback(
   _policy?: ModelRoutingPolicy,
   _currentPaidAttemptsUsed?: number,
   _accumulatedCostUsd: number = 0,
   _nextEstimatedCostUsd?: number
 ): boolean {
-  // PP is permanently 100% FREE. Paid fallback is unconditionally disallowed.
   return false;
 }
-

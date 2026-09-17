@@ -16,6 +16,8 @@ import { OperationalEventBridge } from '../events/bridge.js';
 import { loadOpenRouterConfig } from '../../providers/openrouterConfig.js';
 import { classifyTaskProfile } from '../../routing/classifier.js';
 import { isFreeModel } from '../../routing/registry.js';
+import { resolveGatewayCandidates } from '../../routing/catalog.js';
+import type { GatewayKind } from '../../providers/gateway/types.js';
 import { CorrectionController } from './correction-controller.js';
 
 import { VerificationGate } from '../verification/verification-gate.js';
@@ -322,27 +324,48 @@ export class PrototypeWorker {
       };
 
 
-      // Resolve ordered candidate list from the routing policy engine
-      const routingCfg = (() => {
-        try {
-          return loadOpenRouterConfig(undefined, taskWithInstructions);
-        } catch {
-          return null;
-        }
-      })();
-      const rawCandidateModels = routingCfg?.candidateModels ?? [];
-      // STRICT SAFETY GATE: Enforce that all candidates are FREE models
-      const candidateModels = rawCandidateModels.filter(c => c.free && isFreeModel(c.model));
-      const primaryModelName = candidateModels[0]?.model ?? routingCfg?.primaryModel ?? 'openrouter/free';
+      // Resolve ordered candidate list from Dual Gateway catalog (OpenRouter + 9router) or routing engine
+      const primaryGateway = (process.env.PRIMARY_GATEWAY === '9router' ? '9router' : 'openrouter') as GatewayKind;
+      const isDualGateway = (this.provider as any).kind === 'dual-gateway' || typeof (this.provider as any).getGateway === 'function';
 
+      const candidateModels = (() => {
+        if ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim() && isFreeModel(task.modelOverride)) {
+          return [{ gateway: primaryGateway, model: task.modelOverride.trim(), free: true as const, tier: 1 }];
+        }
+        if (this.provider.kind === 'mock' && this.provider.model && this.provider.model !== 'openrouter/free') {
+          return [{ gateway: primaryGateway, model: this.provider.model, free: true as const, tier: 1 }];
+        }
+        if (isDualGateway) {
+          const gatewayResolution = resolveGatewayCandidates(primaryGateway);
+          return gatewayResolution.candidates.filter(c => c.free && isFreeModel(c.model));
+        }
+        // Standalone OpenRouter provider or mock provider testing fallback routing:
+        // Use loadOpenRouterConfig from the routing engine
+        const routingCfg = (() => {
+          try {
+            return loadOpenRouterConfig(undefined, taskWithInstructions);
+          } catch {
+            return null;
+          }
+        })();
+        const list = routingCfg?.candidateModels ?? [];
+        if (list.length > 0) {
+          return list.map(c => ({ gateway: primaryGateway, model: c.model, free: c.free, tier: c.tier }));
+        }
+        const gatewayResolution = resolveGatewayCandidates(primaryGateway);
+        return gatewayResolution.candidates.filter(c => c.free && isFreeModel(c.model));
+      })();
+
+      const primaryModelName = candidateModels[0]?.model ?? 'openrouter/free';
 
       console.log(JSON.stringify({
         event: 'MODEL_ROUTING_SELECTED',
         taskId: task.id,
         sessionId,
         profile: derivedProfile,
+        primaryGateway,
         candidateCount: candidateModels.length,
-        candidates: candidateModels.map(c => ({ model: c.model, tier: c.tier, free: c.free })),
+        candidates: candidateModels.map(c => ({ gateway: c.gateway, model: c.model, tier: c.tier, free: c.free })),
         timestamp: new Date().toISOString(),
       }));
 
@@ -359,9 +382,8 @@ export class PrototypeWorker {
         if (r.status === 'TIMED_OUT') return true; // IDLE_TIMEOUT or EXECUTION_TIMEOUT
         if (r.status === 'ROUTER_TIMEOUT' || r.status === 'ROUTER_CONNECTION_ERROR') return true;
         if (r.status === 'ROUTER_HTTP_ERROR') {
-          // 5xx and 429 are retryable; 4xx auth/validation errors are not
           const http = r.httpStatus ?? 0;
-          return http === 429 || http >= 500;
+          return http === 429 || http >= 500 || http === 404; // 404 is retryable (model unavailable on upstream)
         }
         return false; // COMPLETED, FAILED (deterministic PP), TOOL_LOOP_LIMIT, START_ERROR
       }
@@ -370,7 +392,17 @@ export class PrototypeWorker {
 
       let result!: ProviderTaskResult;
       let lastAttemptModel = primaryModelName;
+      let activeGateway: GatewayKind = candidateModels[0]?.gateway ?? primaryGateway;
       const attemptedModels: string[] = [];
+
+      console.log(JSON.stringify({
+        event: 'GATEWAY_SELECTED',
+        taskId: task.id,
+        sessionId,
+        gateway: activeGateway,
+        model: candidateModels[0]?.model ?? primaryModelName,
+        timestamp: new Date().toISOString(),
+      }));
 
       // ── CANDIDATE FALLBACK LOOP ───────────────────────────────────────────
       const maxAttempts = candidateModels.length > 0 ? candidateModels.length : 1;
@@ -402,6 +434,18 @@ export class PrototypeWorker {
         attemptedModels.push(candidateModel);
 
 
+        const candidateGateway = (candidateEntry as any)?.gateway ?? 'openrouter';
+        if (candidateGateway !== activeGateway) {
+          console.log(JSON.stringify({
+            event: 'GATEWAY_FALLBACK_STARTED',
+            taskId: task.id, sessionId,
+            fromGateway: activeGateway, toGateway: candidateGateway,
+            attemptIdx, model: candidateModel,
+            timestamp: new Date().toISOString(),
+          }));
+          activeGateway = candidateGateway;
+        }
+
         if (attemptIdx > 0) {
           const prevModel = candidateModels[attemptIdx - 1]?.model ?? primaryModelName;
           console.log(JSON.stringify({
@@ -417,7 +461,8 @@ export class PrototypeWorker {
           event: 'MODEL_ATTEMPT_STARTED',
           taskId: task.id, sessionId,
           attemptIdx, model: candidateModel,
-          provider: this.provider.kind || 'openrouter',
+          gateway: candidateGateway,
+          provider: (this.provider as any).gateways?.[candidateGateway]?.kind ?? this.provider.kind ?? candidateGateway,
           timestamp: new Date().toISOString(),
         }));
 
@@ -453,7 +498,7 @@ export class PrototypeWorker {
 
         sink.emitEnvelope('attempt_started', {
           attempt: attemptIdx,
-          provider: this.provider.kind || 'openrouter',
+          provider: candidateGateway,
           model: candidateModel,
         });
 
@@ -480,7 +525,7 @@ export class PrototypeWorker {
           const errMsg = `AI Provider execution timed out: idle timeout exceeded (${Math.round(this.idleTimeoutMs / 1000)}s without activity)`;
           resolveAttemptTimeout({
             status: 'TIMED_OUT',
-            provider: this.provider.kind || 'openrouter',
+            provider: candidateGateway as any,
             model: candidateModel,
             exitCode: null, durationMs: Date.now() - attemptStarted,
             stdout: '', stderr: errMsg,
@@ -496,7 +541,7 @@ export class PrototypeWorker {
           const errMsg = `AI Provider execution timed out: absolute timeout exceeded (${Math.round(this.absoluteTimeoutMs / 1000)}s limit)`;
           resolveAttemptTimeout({
             status: 'TIMED_OUT',
-            provider: this.provider.kind || 'openrouter',
+            provider: candidateGateway as any,
             model: candidateModel,
             exitCode: null, durationMs: Date.now() - attemptStarted,
             stdout: '', stderr: errMsg,
@@ -509,10 +554,15 @@ export class PrototypeWorker {
         // Start idle timer
         resetIdleTimer();
 
+        // Select effective provider: If this.provider is a GatewayRouter, dispatch to candidateGateway adapter
+        const effectiveProvider: AgentProvider = (typeof (this.provider as any).getGateway === 'function')
+          ? (this.provider as any).getGateway(candidateGateway)
+          : this.provider;
+
         let attemptResult: ProviderTaskResult;
         try {
           attemptResult = await Promise.race([
-            this.provider.execute(taskForAttempt, workspace, {
+            effectiveProvider.execute(taskForAttempt, workspace, {
               consumer: sink,
               signal: attemptAbort.signal,
             }),
@@ -523,7 +573,7 @@ export class PrototypeWorker {
           const errMsg = e?.message ?? String(e);
           attemptResult = {
             status: 'TIMED_OUT',
-            provider: this.provider.kind || 'openrouter',
+            provider: candidateGateway as any,
             model: candidateModel,
             exitCode: null, durationMs,
             stdout: '', stderr: errMsg,

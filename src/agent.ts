@@ -48,6 +48,8 @@ export class MockProvider implements AgentProvider {
   }
 }
 
+import { GatewayRouter } from './routing/gateway-router.js';
+
 export function createSingleProvider(providerName: string, modelOverride?: string): AgentProvider {
   if (providerName === 'mock') {
     return new MockProvider();
@@ -65,6 +67,12 @@ export function createSingleProvider(providerName: string, modelOverride?: strin
     return new OpenRouterProvider(undefined, undefined, undefined, modelOverride);
   }
 
+  if (providerName === 'dual-gateway' || providerName === 'gateway-router') {
+    return new GatewayRouter({
+      primaryGateway: (process.env.PRIMARY_GATEWAY === '9router' ? '9router' : 'openrouter'),
+    });
+  }
+
   return new MockProvider();
 }
 
@@ -73,7 +81,7 @@ export function createProvider(provider?: string): AgentProvider {
   const fallbackGateway = process.env.FALLBACK_GATEWAY?.trim();
 
   if (
-    (!provider || provider === 'gateway' || provider === 'dual') &&
+    (!provider || provider === 'gateway' || provider === 'dual' || provider === 'dual-gateway') &&
     primaryGateway &&
     fallbackGateway &&
     primaryGateway !== fallbackGateway
@@ -81,6 +89,10 @@ export function createProvider(provider?: string): AgentProvider {
     const primary = createSingleProvider(primaryGateway);
     const fallback = createSingleProvider(fallbackGateway);
     return new DualGatewayProvider(primary, fallback);
+  }
+
+  if (!provider && process.env.ENABLE_DUAL_GATEWAY === 'true') {
+    return new GatewayRouter();
   }
 
   if ((!provider || provider === 'gateway' || provider === 'dual') && primaryGateway) {

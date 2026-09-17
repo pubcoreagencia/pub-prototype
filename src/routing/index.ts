@@ -5,3 +5,5 @@ export * from './classifier.js';
 export * from './engine.js';
 export * from './observability.js';
 export * from './calibration.js';
+export * from './catalog.js';
+export * from './gateway-router.js';
