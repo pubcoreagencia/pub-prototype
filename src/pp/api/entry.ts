@@ -25,6 +25,9 @@ import { AuthService } from '../auth/auth.js';
 import { VerificationGate } from '../verification/verification-gate.js';
 import { createSovereignAuthRouter } from '../auth/http.js';
 import { getAuthProvider } from '../auth/factory.js';
+import { KeyManager } from '../auth/sovereign/key-manager.js';
+import { SovereignAuthProvider } from '../auth/sovereign-provider.js';
+import { CompositeAuthProvider } from '../auth/composite-provider.js';
 import { ALLOWED_ORIGINS, isAllowedOrigin } from '../config/origins.js';
 
 export const createPpApp = (
@@ -32,11 +35,13 @@ export const createPpApp = (
   tasks?: PpTaskRepository,
   prototypes?: PostgresPrototypeRepository,
   pdlHandoff?: PdlTaskIngestionPort,
+  keyManager?: KeyManager,
 ) => {
   const activePool = pool ?? new Pool({ connectionString: process.env.DATABASE_URL });
+  const activeKeyManager = keyManager ?? new KeyManager();
   const taskRepo = tasks ?? new PostgresPpTaskRepository(activePool);
   const protoRepo = prototypes ?? new PostgresPrototypeRepository(activePool);
-  const activeAuthProvider = getAuthProvider({ pool: activePool });
+  const activeAuthProvider = getAuthProvider({ pool: activePool, keyManager: activeKeyManager });
   const authService = new AuthService(protoRepo, activeAuthProvider);
   const previewRecovery = new PreviewRecoveryService(protoRepo);
   const verificationGate = new VerificationGate(protoRepo);
@@ -594,7 +599,17 @@ export const createPpApp = (
   });
 
   // Sovereign Auth HTTP Contract (Phase 3)
-  const sovereignAuthRouter = createSovereignAuthRouter({ pool: activePool, protoRepo });
+  const sovereignProvider = activeAuthProvider instanceof CompositeAuthProvider
+    ? activeAuthProvider.getSovereignProvider()
+    : activeAuthProvider instanceof SovereignAuthProvider
+      ? activeAuthProvider
+      : undefined;
+  const sovereignAuthRouter = createSovereignAuthRouter({
+    pool: activePool,
+    protoRepo,
+    keyManager: activeKeyManager,
+    sovereignProvider,
+  });
   app.use('/prototype/auth', sovereignAuthRouter);
 
   // Legacy / Transitional Auth API (Supabase / local dev fallback)
