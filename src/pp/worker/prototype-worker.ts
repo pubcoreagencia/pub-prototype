@@ -14,9 +14,11 @@ import type { PreviewRuntime, PreviewRuntimeInfo } from '../preview/preview-runt
 import { StreamEventSink } from '../../providers/streaming/index.js';
 import { OperationalEventBridge } from '../events/bridge.js';
 import { loadOpenRouterConfig } from '../../providers/openrouterConfig.js';
+import { classifyTaskProfile } from '../../routing/classifier.js';
 import { CorrectionController } from './correction-controller.js';
 import { VerificationGate } from '../verification/verification-gate.js';
 import { VerificationRecoveryOrchestrator } from './verification-recovery-orchestrator.js';
+
 
 const IGNORED_DIRS = new Set(['.git', 'node_modules', '.next', '.cache', 'dist', 'build']);
 
@@ -306,186 +308,305 @@ export class PrototypeWorker {
       const baseline = captureWorkspaceSnapshot(workspace);
       const started = Date.now();
 
-      const controller = new AbortController();
-      let idleTimer: NodeJS.Timeout | null = null;
-      let absoluteTimer: NodeJS.Timeout | null = null;
-      let executionFinished = false;
-      let timeoutReason: 'IDLE' | 'ABSOLUTE' | null = null;
-
-      let resolveTimeout!: (value: ProviderTaskResult) => void;
-      const timeoutPromise = new Promise<ProviderTaskResult>((resolve) => {
-        resolveTimeout = resolve;
-      });
-
-      const cleanupTimers = () => {
-        if (idleTimer) {
-          clearTimeout(idleTimer);
-          idleTimer = null;
-        }
-        if (absoluteTimer) {
-          clearTimeout(absoluteTimer);
-          absoluteTimer = null;
-        }
-      };
-
-      const handleTimeout = (reason: 'IDLE' | 'ABSOLUTE') => {
-        if (executionFinished) return;
-        executionFinished = true;
-        timeoutReason = reason;
-        cleanupTimers();
-        controller.abort();
-
-        const durationMs = Date.now() - started;
-        const errorMessage = reason === 'IDLE'
-          ? `AI Provider execution timed out: idle timeout exceeded (${Math.round(this.idleTimeoutMs / 1000)}s without activity)`
-          : `AI Provider execution timed out: absolute timeout exceeded (${Math.round(this.absoluteTimeoutMs / 1000)}s limit)`;
-
-        resolveTimeout({
-          status: 'TIMED_OUT',
-          provider: this.provider.kind || 'openrouter',
-          model: initialModel || (this.provider as any).model || 'default',
-          exitCode: null,
-          durationMs,
-          stdout: '',
-          stderr: errorMessage,
-          changedFiles: [],
-          commit: null,
-          errorCode: reason === 'IDLE' ? 'IDLE_TIMEOUT' : 'EXECUTION_TIMEOUT',
-          errorMessage,
-        });
-      };
-
-      const resetIdleTimer = () => {
-        if (executionFinished) return;
-        if (idleTimer) {
-          clearTimeout(idleTimer);
-        }
-        idleTimer = setTimeout(() => handleTimeout('IDLE'), this.idleTimeoutMs);
-      };
-
-      // Start two-tier timers
-      resetIdleTimer();
-      absoluteTimer = setTimeout(() => handleTimeout('ABSOLUTE'), this.absoluteTimeoutMs);
-
-      const bridge = new OperationalEventBridge(sessionId, this.events);
-      const sink = new StreamEventSink(
-        {
-          onEnvelope: (envelope) => {
-            resetIdleTimer();
-            bridge.handleEnvelope(envelope).catch(() => undefined);
-          },
-          onActivity: () => {
-            resetIdleTimer();
-          },
-        },
-        { taskId: task.id, attempt: 0 }
-      );
-
+      // ── ROUTING SETUP ─────────────────────────────────────────────────────
+      // Derive routing profile from task data (never force 'fast_prototype')
+      // PrototypeTask does not declare routingProfile; access it defensively
+      const taskRoutingProfile = (task as any).routingProfile as import('../../routing/types.js').TaskRoutingProfile | undefined;
+      const derivedProfile = taskRoutingProfile ?? classifyTaskProfile(task as any);
       const taskWithInstructions: ProviderTaskInput = {
         ...task,
         systemInstructions: [...PREVIEW_SYSTEM_INSTRUCTIONS],
-        routingProfile: 'fast_prototype',
+        routingProfile: derivedProfile,
       };
 
-      // Resolve the dynamic model selected by policy for this task (if provider is OpenRouter or DualGateway)
-      let initialModel = (this.provider as any).model;
-      if (!initialModel || initialModel === 'default' || initialModel === 'openrouter/free') {
+
+      // Resolve ordered candidate list from the routing policy engine
+      const routingCfg = (() => {
         try {
-          const cfg = loadOpenRouterConfig(undefined, taskWithInstructions);
-          if (cfg?.primaryModel) {
-            initialModel = cfg.primaryModel;
-          }
+          return loadOpenRouterConfig(undefined, taskWithInstructions);
         } catch {
-          // ignore error and fall back to provider default
+          return null;
         }
+      })();
+      const candidateModels = routingCfg?.candidateModels ?? [];
+      const primaryModelName = routingCfg?.primaryModel ?? (this.provider as any).model ?? 'default';
+
+      console.log(JSON.stringify({
+        event: 'MODEL_ROUTING_SELECTED',
+        taskId: task.id,
+        sessionId,
+        profile: derivedProfile,
+        candidateCount: candidateModels.length,
+        candidates: candidateModels.map(c => ({ model: c.model, tier: c.tier, free: c.free })),
+        timestamp: new Date().toISOString(),
+      }));
+
+      // ── ABSOLUTE TIMEOUT (shared across all attempts) ─────────────────────
+      let absoluteTimedOut = false;
+      const absoluteAbort = new AbortController();
+      const absoluteTimer = setTimeout(() => {
+        absoluteTimedOut = true;
+        absoluteAbort.abort();
+      }, this.absoluteTimeoutMs);
+
+      // Helper: classify whether an error/result should trigger model fallback
+      function isRetryableFailure(r: ProviderTaskResult): boolean {
+        if (r.status === 'TIMED_OUT') return true; // IDLE_TIMEOUT or EXECUTION_TIMEOUT
+        if (r.status === 'ROUTER_TIMEOUT' || r.status === 'ROUTER_CONNECTION_ERROR') return true;
+        if (r.status === 'ROUTER_HTTP_ERROR') {
+          // 5xx and 429 are retryable; 4xx auth/validation errors are not
+          const http = r.httpStatus ?? 0;
+          return http === 429 || http >= 500;
+        }
+        return false; // COMPLETED, FAILED (deterministic PP), TOOL_LOOP_LIMIT, START_ERROR
       }
 
-      // Emit initial attempt_started lifecycle event
-      sink.emitEnvelope('attempt_started', {
-        attempt: 0,
-        provider: this.provider.kind || 'openrouter',
-        model: initialModel || (this.provider as any).model || 'default',
-      });
+      const bridge = new OperationalEventBridge(sessionId, this.events);
 
-      let result: ProviderTaskResult;
-      try {
-        result = await Promise.race([
-          this.provider.execute(taskWithInstructions, workspace, {
-            consumer: sink,
-            signal: controller.signal,
-          }),
-          timeoutPromise,
-        ]);
-        executionFinished = true;
-        cleanupTimers();
-      } catch (e: any) {
-        executionFinished = true;
-        cleanupTimers();
-        if (controller.signal.aborted || timeoutReason) {
+      let result!: ProviderTaskResult;
+      let lastAttemptModel = primaryModelName;
+      const attemptedModels: string[] = [];
+
+      // ── CANDIDATE FALLBACK LOOP ───────────────────────────────────────────
+      const maxAttempts = candidateModels.length > 0 ? candidateModels.length : 1;
+      for (let attemptIdx = 0; attemptIdx < maxAttempts; attemptIdx++) {
+        // Check if absolute timeout has fired before starting next attempt
+        if (absoluteTimedOut) {
           const durationMs = Date.now() - started;
-          const errorMessage = timeoutReason === 'IDLE'
-            ? `AI Provider execution timed out: idle timeout exceeded (${Math.round(this.idleTimeoutMs / 1000)}s without activity)`
-            : timeoutReason === 'ABSOLUTE'
-              ? `AI Provider execution timed out: absolute timeout exceeded (${Math.round(this.absoluteTimeoutMs / 1000)}s limit)`
-              : 'AI Provider execution timed out';
+          const errMsg = `AI Provider execution timed out: absolute timeout exceeded (${Math.round(this.absoluteTimeoutMs / 1000)}s limit)`;
           result = {
             status: 'TIMED_OUT',
             provider: this.provider.kind || 'openrouter',
-            model: initialModel || (this.provider as any).model || 'default',
-            exitCode: null,
-            durationMs,
-            stdout: '',
-            stderr: errorMessage,
-            changedFiles: [],
-            commit: null,
-            errorCode: timeoutReason === 'IDLE' ? 'IDLE_TIMEOUT' : 'EXECUTION_TIMEOUT',
-            errorMessage,
+            model: lastAttemptModel,
+            exitCode: null, durationMs,
+            stdout: result?.stdout ?? '', stderr: errMsg,
+            changedFiles: [], commit: null,
+            errorCode: 'EXECUTION_TIMEOUT', errorMessage: errMsg,
           };
-        } else {
-          throw e;
+          break;
         }
-      } finally {
-        executionFinished = true;
-        cleanupTimers();
-      }
 
-      if (controller.signal.aborted || timeoutReason) {
-        const durationMs = Date.now() - started;
-        const errorMessage = timeoutReason === 'IDLE'
-          ? `AI Provider execution timed out: idle timeout exceeded (${Math.round(this.idleTimeoutMs / 1000)}s without activity)`
-          : timeoutReason === 'ABSOLUTE'
-            ? `AI Provider execution timed out: absolute timeout exceeded (${Math.round(this.absoluteTimeoutMs / 1000)}s limit)`
-            : (result?.errorMessage ?? 'AI Provider execution timed out');
-        result = {
-          status: 'TIMED_OUT',
+        const candidateEntry = candidateModels[attemptIdx];
+        const candidateModel = candidateEntry?.model ?? primaryModelName;
+        lastAttemptModel = candidateModel;
+        attemptedModels.push(candidateModel);
+
+        if (attemptIdx > 0) {
+          const prevModel = candidateModels[attemptIdx - 1]?.model ?? primaryModelName;
+          console.log(JSON.stringify({
+            event: 'MODEL_FALLBACK_STARTED',
+            taskId: task.id, sessionId,
+            fromModel: prevModel, toModel: candidateModel,
+            attemptIdx,
+            timestamp: new Date().toISOString(),
+          }));
+        }
+
+        console.log(JSON.stringify({
+          event: 'MODEL_ATTEMPT_STARTED',
+          taskId: task.id, sessionId,
+          attemptIdx, model: candidateModel,
           provider: this.provider.kind || 'openrouter',
-          model: initialModel || (this.provider as any).model || 'default',
-          exitCode: null,
-          durationMs,
-          stdout: result?.stdout ?? '',
-          stderr: errorMessage,
-          changedFiles: [],
-          commit: null,
-          errorCode: timeoutReason === 'IDLE' ? 'IDLE_TIMEOUT' : 'EXECUTION_TIMEOUT',
-          errorMessage,
+          timestamp: new Date().toISOString(),
+        }));
+
+        // ── PER-ATTEMPT ABORT + IDLE TIMER ───────────────────────────────────
+        const attemptAbort = new AbortController();
+        let idleTimer: NodeJS.Timeout | null = null;
+        let attemptIdleTimedOut = false;
+
+        const clearIdleTimer = () => {
+          if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
         };
+
+        const resetIdleTimer = () => {
+          if (absoluteTimedOut || attemptIdleTimedOut) return;
+          clearIdleTimer();
+          // triggerIdleTimeout is declared below (needs resolveAttemptTimeout)
+          idleTimer = setTimeout(() => triggerIdleTimeout(), this.idleTimeoutMs);
+        };
+
+
+
+        const attemptStarted = Date.now();
+        const sink = new StreamEventSink(
+          {
+            onEnvelope: (envelope) => {
+              resetIdleTimer();
+              bridge.handleEnvelope(envelope).catch(() => undefined);
+            },
+            onActivity: () => { resetIdleTimer(); },
+          },
+          { taskId: task.id, attempt: attemptIdx }
+        );
+
+        sink.emitEnvelope('attempt_started', {
+          attempt: attemptIdx,
+          provider: this.provider.kind || 'openrouter',
+          model: candidateModel,
+        });
+
+        // Override model on provider for this attempt if possible
+        const taskForAttempt: ProviderTaskInput = {
+          ...taskWithInstructions,
+          routingProfile: derivedProfile,
+          // Pass model override so the provider uses this candidate
+          modelOverride: candidateModel,
+        } as any;
+
+        // Per-attempt timeout promise: resolves when idle or absolute timer fires
+        let resolveAttemptTimeout!: (value: ProviderTaskResult) => void;
+        const attemptTimeoutPromise = new Promise<ProviderTaskResult>((resolve) => {
+          resolveAttemptTimeout = resolve;
+        });
+
+        // triggerIdleTimeout resolves the timeout promise and aborts the attempt
+        const triggerIdleTimeout = () => {
+          if (attemptIdleTimedOut) return;
+          attemptIdleTimedOut = true;
+          clearIdleTimer();
+          attemptAbort.abort();
+          const errMsg = `AI Provider execution timed out: idle timeout exceeded (${Math.round(this.idleTimeoutMs / 1000)}s without activity)`;
+          resolveAttemptTimeout({
+            status: 'TIMED_OUT',
+            provider: this.provider.kind || 'openrouter',
+            model: candidateModel,
+            exitCode: null, durationMs: Date.now() - attemptStarted,
+            stdout: '', stderr: errMsg,
+            changedFiles: [], commit: null,
+            errorCode: 'IDLE_TIMEOUT', errorMessage: errMsg,
+          });
+        };
+
+        // Absolute timeout also resolves the timeout promise
+        const onAbsoluteAbort = () => {
+          clearIdleTimer();
+          attemptAbort.abort();
+          const errMsg = `AI Provider execution timed out: absolute timeout exceeded (${Math.round(this.absoluteTimeoutMs / 1000)}s limit)`;
+          resolveAttemptTimeout({
+            status: 'TIMED_OUT',
+            provider: this.provider.kind || 'openrouter',
+            model: candidateModel,
+            exitCode: null, durationMs: Date.now() - attemptStarted,
+            stdout: '', stderr: errMsg,
+            changedFiles: [], commit: null,
+            errorCode: 'EXECUTION_TIMEOUT', errorMessage: errMsg,
+          });
+        };
+        absoluteAbort.signal.addEventListener('abort', onAbsoluteAbort, { once: true });
+
+        // Start idle timer
+        resetIdleTimer();
+
+        let attemptResult: ProviderTaskResult;
+        try {
+          attemptResult = await Promise.race([
+            this.provider.execute(taskForAttempt, workspace, {
+              consumer: sink,
+              signal: attemptAbort.signal,
+            }),
+            attemptTimeoutPromise,
+          ]);
+        } catch (e: any) {
+          const durationMs = Date.now() - attemptStarted;
+          const errMsg = e?.message ?? String(e);
+          attemptResult = {
+            status: 'TIMED_OUT',
+            provider: this.provider.kind || 'openrouter',
+            model: candidateModel,
+            exitCode: null, durationMs,
+            stdout: '', stderr: errMsg,
+            changedFiles: [], commit: null,
+            errorCode: 'PROVIDER_ERROR', errorMessage: errMsg,
+          };
+        } finally {
+          clearIdleTimer();
+          absoluteAbort.signal.removeEventListener('abort', onAbsoluteAbort);
+        }
+
+        // If our timers fired but the provider also resolved, normalise to TIMED_OUT with our message
+        if ((attemptIdleTimedOut || absoluteTimedOut) && attemptResult.status !== 'TIMED_OUT') {
+          const errMsg = absoluteTimedOut
+            ? `AI Provider execution timed out: absolute timeout exceeded (${Math.round(this.absoluteTimeoutMs / 1000)}s limit)`
+            : `AI Provider execution timed out: idle timeout exceeded (${Math.round(this.idleTimeoutMs / 1000)}s without activity)`;
+          attemptResult = {
+            ...attemptResult,
+            status: 'TIMED_OUT',
+            model: candidateModel,
+            stderr: errMsg, changedFiles: [], commit: null,
+            errorCode: absoluteTimedOut ? 'EXECUTION_TIMEOUT' : 'IDLE_TIMEOUT',
+            errorMessage: errMsg,
+          };
+        }
+
+
+
+        const attemptDurationMs = Date.now() - attemptStarted;
+        const canFallback = isRetryableFailure(attemptResult) && !absoluteTimedOut;
+        const hasMoreCandidates = attemptIdx + 1 < maxAttempts;
+
+
+        if (attemptResult.status === 'COMPLETED' || !canFallback || !hasMoreCandidates) {
+          // Emit attempt result event
+          if (attemptResult.status === 'COMPLETED') {
+            sink.emitEnvelope('attempt_completed', {
+              attempt: attemptIdx,
+              status: attemptResult.status,
+              durationMs: attemptDurationMs,
+            });
+            console.log(JSON.stringify({
+              event: 'MODEL_ATTEMPT_SUCCEEDED',
+              taskId: task.id, sessionId,
+              attemptIdx, model: candidateModel,
+              durationMs: attemptDurationMs,
+              timestamp: new Date().toISOString(),
+            }));
+          } else {
+            sink.emitEnvelope('attempt_failed', {
+              attempt: attemptIdx,
+              error: attemptResult.errorMessage ?? attemptResult.stderr ?? 'Prototype agent failed',
+              retryable: false,
+            });
+            const isExhausted = !hasMoreCandidates && canFallback;
+            console.log(JSON.stringify({
+              event: isExhausted ? 'MODEL_ROUTING_EXHAUSTED' : 'MODEL_ATTEMPT_FAILED',
+              taskId: task.id, sessionId,
+              attemptIdx, model: candidateModel,
+              candidateCount: maxAttempts,
+              reason: attemptResult.errorCode ?? attemptResult.status,
+              durationMs: attemptDurationMs,
+              timestamp: new Date().toISOString(),
+            }));
+          }
+          result = { ...attemptResult, model: attemptResult.model ?? candidateModel, modelAttempts: attemptedModels };
+          break;
+        }
+
+        // Retryable — log failure and continue to next candidate
+        sink.emitEnvelope('attempt_failed', {
+          attempt: attemptIdx,
+          error: attemptResult.errorMessage ?? attemptResult.stderr ?? 'Prototype agent failed',
+          retryable: true,
+        });
+        console.log(JSON.stringify({
+          event: 'MODEL_ATTEMPT_FAILED',
+          taskId: task.id, sessionId,
+          attemptIdx, model: candidateModel,
+          reason: attemptResult.errorCode ?? attemptResult.status,
+          durationMs: attemptDurationMs,
+          willFallback: true,
+          timestamp: new Date().toISOString(),
+        }));
+
+        result = { ...attemptResult, model: attemptResult.model ?? candidateModel, modelAttempts: attemptedModels };
+        // Continue to next candidate
       }
 
-      // If provider completed, emit attempt_completed before closing bridge
-      if (result.status === 'COMPLETED') {
-        sink.emitEnvelope('attempt_completed', {
-          attempt: 0,
-          status: result.status,
-          durationMs: result.durationMs,
-        });
-      } else {
-        sink.emitEnvelope('attempt_failed', {
-          attempt: 0,
-          error: result.errorMessage ?? result.stderr ?? 'Prototype agent failed',
-          retryable: false,
-        });
-      }
+      // Clean up absolute timer
+      clearTimeout(absoluteTimer);
+
       await bridge.close();
+
 
 
 
