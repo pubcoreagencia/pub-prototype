@@ -1,5 +1,8 @@
-// src/routing/registry.ts
 import type { ModelCapabilityDefinition, TaskRoutingProfile } from './types.js';
+import {
+  OPENROUTER_VERIFIED_FREE_MODELS,
+  ROUTER_VERIFIED_FREE_MODELS,
+} from './catalog-models.js';
 
 /**
  * Centralized Model Capability Registry.
@@ -461,6 +464,13 @@ export function isFreeModel(modelName?: string | null): boolean {
   return false;
 }
 
+const VERIFIED_FREE_MODELS_SET = new Set<string>([
+  ...OPENROUTER_VERIFIED_FREE_MODELS.map(m => m.trim().toLowerCase()),
+  ...ROUTER_VERIFIED_FREE_MODELS.map(m => m.trim().toLowerCase()),
+  'openrouter/free',
+  'router/free-pool',
+]);
+
 /**
  * Checks whether a given model identifier is live-verified in the active PP catalog
  * or belongs to a dynamic free pool / mock test harness.
@@ -472,16 +482,8 @@ export function isVerifiedFreeModel(modelName?: string | null): boolean {
   // Test / mock fixtures always allowed in test environment
   if (trimmed === 'mock-model' || trimmed.startsWith('mock-') || trimmed.startsWith('candidate-')) return true;
 
-  // Dynamic router pools
-  if (trimmed === 'openrouter/free' || trimmed === 'router/free-pool') return true;
-
-  // Curated active models in registry that are free AND enabled
-  const cap = getModelCapability(trimmed);
-  if (cap) {
-    return cap.free === true && cap.enabled === true;
-  }
-
-  return false;
+  // Strict check against live-verified catalogs and dynamic free pools
+  return VERIFIED_FREE_MODELS_SET.has(trimmed);
 }
 
 /**

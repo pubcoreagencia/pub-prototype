@@ -130,12 +130,8 @@ export class GatewayRouter implements AgentProvider {
       openRouterModels: this.configuredOpenRouterModels,
       routerModels: this.configuredRouterModels,
     });
-    const allowedExplicit = new Set([
-      ...(this.configuredOpenRouterModels ?? []),
-      ...(this.configuredRouterModels ?? []),
-    ]);
     const valid = candidates.filter(
-      c => (isVerifiedFreeModel(c.model) || (allowedExplicit.has(c.model) && isFreeModel(c.model))) && this.isModelAvailable(c.model)
+      c => isVerifiedFreeModel(c.model) && this.isModelAvailable(c.model)
     );
     return {
       candidates: valid,
@@ -199,19 +195,12 @@ export class GatewayRouter implements AgentProvider {
     let activeGateway = candidates[0].gateway;
     this.emit('GATEWAY_SELECTED', { gateway: activeGateway, model: candidates[0].model });
 
-    const allowedExplicit = new Set([
-      ...(this.configuredOpenRouterModels ?? []),
-      ...(this.configuredRouterModels ?? []),
-    ]);
-
     for (let i = 0; i < candidates.length; i++) {
       const candidate = candidates[i];
 
-      // ABSOLUTE SECURITY GATE: Must be FREE and live-verified in catalog (or configured explicit free model)
+      // ABSOLUTE SECURITY GATE: Must be FREE and live-verified in catalog
       assertFreeModel(candidate.model);
-      if (!allowedExplicit.has(candidate.model)) {
-        assertVerifiedFreeModel(candidate.model);
-      }
+      assertVerifiedFreeModel(candidate.model);
 
       if (options?.signal?.aborted) {
         return {

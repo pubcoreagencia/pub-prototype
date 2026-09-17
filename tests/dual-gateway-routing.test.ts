@@ -99,7 +99,7 @@ describe('Dual Gateway Architecture & 20 Verified FREE Models', () => {
       expect(mockOpenRouter.execute).not.toHaveBeenCalled();
     });
 
-    it('paid models throw PAID_MODEL_FORBIDDEN before any network request is attempted', async () => {
+    it('explicitly configured unverified free models are filtered out from candidates and never executed', async () => {
       const mockOpenRouter: GatewayProvider = {
         kind: 'openrouter',
         model: null,
@@ -110,12 +110,19 @@ describe('Dual Gateway Architecture & 20 Verified FREE Models', () => {
         metadata: () => ({}),
         execute: vi.fn(),
       };
-      const router = new GatewayRouter({ openrouter: mockOpenRouter });
 
-      await expect(
-        router.execute({ id: 't-paid', objective: 'paid test', prompt: 'test', modelOverride: 'openai/gpt-4o-mini' } as any, '/tmp')
-      ).rejects.toThrow('PAID_MODEL_FORBIDDEN');
+      const router = new GatewayRouter({
+        openrouter: mockOpenRouter,
+        openRouterModels: ['google/gemma-4-26b-a4b-it:free', 'poolside/laguna-s-2.1:free'],
+        routerModels: [],
+      });
 
+      const { candidates } = router.getCandidates();
+      expect(candidates).toHaveLength(0);
+
+      const res = await router.execute({ id: 't-no-cand', objective: 'test', prompt: 'test' }, '/tmp');
+      expect(res.status).toBe('FAILED');
+      expect(res.errorCode).toBe('ROUTING_EXHAUSTED');
       expect(mockOpenRouter.execute).not.toHaveBeenCalled();
     });
   });
@@ -198,7 +205,7 @@ describe('Dual Gateway Architecture & 20 Verified FREE Models', () => {
       const routerExecute = vi.fn().mockResolvedValue({
         status: 'COMPLETED',
         provider: '9router',
-        model: ROUTER_KNOWN_MODELS[0],
+        model: ROUTER_VERIFIED_FREE_MODELS[0],
         exitCode: 0,
         durationMs: 120,
         stdout: 'Success on 9router fallback',
@@ -224,14 +231,14 @@ describe('Dual Gateway Architecture & 20 Verified FREE Models', () => {
       const router = new GatewayRouter({
         openrouter: mockOpenRouter,
         router: mock9router,
-        routerModels: ROUTER_KNOWN_MODELS,
+        routerModels: ROUTER_VERIFIED_FREE_MODELS,
         onEvent: (e) => events.push(e),
       });
 
       const res = await router.execute({ id: 't2', objective: 'test fallback', prompt: 'test' }, '/tmp');
       expect(res.status).toBe('COMPLETED');
       expect(res.provider).toBe('9router');
-      expect(res.model).toBe(ROUTER_KNOWN_MODELS[0]);
+      expect(res.model).toBe(ROUTER_VERIFIED_FREE_MODELS[0]);
       // OpenRouter tried all 10 free candidates
       expect(openRouterExecute).toHaveBeenCalledTimes(10);
       // 9router tried first candidate and succeeded
@@ -392,7 +399,7 @@ describe('Dual Gateway Architecture & 20 Verified FREE Models', () => {
       const router = new GatewayRouter({
         openrouter: openRouter,
         router: router9,
-        routerModels: ROUTER_KNOWN_MODELS,
+        routerModels: ROUTER_VERIFIED_FREE_MODELS,
         onEvent: (e) => events.push(e),
       });
 

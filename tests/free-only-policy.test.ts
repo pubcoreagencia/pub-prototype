@@ -33,6 +33,14 @@ describe('PP Free-Only Policy Enforcement', () => {
       expect(isVerifiedFreeModel('minimax/minimax-m2.7:free')).toBe(false);
       expect(isVerifiedFreeModel('minimax/minimax-m3:free')).toBe(false);
       expect(isVerifiedFreeModel('unknown/random-model:free')).toBe(false);
+      // Models present in MODEL_REGISTRY (even if enabled: true) but NOT in verified catalogs
+      expect(isFreeModel('google/gemma-4-26b-a4b-it:free')).toBe(true);
+      expect(isVerifiedFreeModel('google/gemma-4-26b-a4b-it:free')).toBe(false);
+      expect(() => assertVerifiedFreeModel('google/gemma-4-26b-a4b-it:free')).toThrow('UNVERIFIED_FREE_MODEL_FORBIDDEN');
+
+      expect(isFreeModel('poolside/laguna-s-2.1:free')).toBe(true);
+      expect(isVerifiedFreeModel('poolside/laguna-s-2.1:free')).toBe(false);
+      expect(() => assertVerifiedFreeModel('poolside/laguna-s-2.1:free')).toThrow('UNVERIFIED_FREE_MODEL_FORBIDDEN');
 
       expect(() => assertVerifiedFreeModel('minimax/minimax-m2.7:free')).toThrow('UNVERIFIED_FREE_MODEL_FORBIDDEN');
     });
