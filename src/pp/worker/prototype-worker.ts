@@ -15,7 +15,7 @@ import { StreamEventSink } from '../../providers/streaming/index.js';
 import { OperationalEventBridge } from '../events/bridge.js';
 import { loadOpenRouterConfig } from '../../providers/openrouterConfig.js';
 import { classifyTaskProfile } from '../../routing/classifier.js';
-import { isFreeModel, isVerifiedFreeModel } from '../../routing/registry.js';
+import { isFreeModel, isVerifiedFreeModel, isVerifiedFreeModelForGateway, assertVerifiedFreeModel } from '../../routing/registry.js';
 import { resolveGatewayCandidates } from '../../routing/catalog.js';
 import type { GatewayKind } from '../../providers/gateway/types.js';
 import { CorrectionController } from './correction-controller.js';
@@ -219,6 +219,11 @@ export class PrototypeWorker {
         timestamp: new Date().toISOString(),
       }));
 
+      // SECURITY GATE: assert modelOverride is verified free before executing any work
+      if ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim()) {
+        assertVerifiedFreeModel(task.modelOverride.trim());
+      }
+
       await this.tasks.update(task.id, { status: 'RUNNING', workspacePath: workspace, branch });
       await this.prototypes.updateSession(sessionId, { status: 'BUILDING', workspacePath: workspace });
       await this.events.emit({ sessionId, type: 'AGENT_STARTED', payload: { taskId: task.id } });
@@ -330,14 +335,16 @@ export class PrototypeWorker {
 
       const candidateModels = (() => {
         if ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim() && isVerifiedFreeModel(task.modelOverride)) {
-          return [{ gateway: primaryGateway, model: task.modelOverride.trim(), free: true as const, tier: 1 }];
+          const override = task.modelOverride.trim();
+          const targetGateway: GatewayKind = isVerifiedFreeModelForGateway(override, '9router') ? '9router' : 'openrouter';
+          return [{ gateway: targetGateway, model: override, free: true as const, tier: 1 }];
         }
         if (this.provider.kind === 'mock' && this.provider.model && this.provider.model !== 'openrouter/free') {
           return [{ gateway: primaryGateway, model: this.provider.model, free: true as const, tier: 1 }];
         }
         if (isDualGateway) {
           const gatewayResolution = resolveGatewayCandidates(primaryGateway);
-          return gatewayResolution.candidates.filter(c => c.free && isVerifiedFreeModel(c.model));
+          return gatewayResolution.candidates.filter(c => c.free && isVerifiedFreeModelForGateway(c.model, c.gateway));
         }
         // Standalone OpenRouter provider or mock provider testing fallback routing:
         // Use loadOpenRouterConfig from the routing engine
@@ -353,7 +360,7 @@ export class PrototypeWorker {
           return list.map(c => ({ gateway: primaryGateway, model: c.model, free: c.free, tier: c.tier }));
         }
         const gatewayResolution = resolveGatewayCandidates(primaryGateway);
-        return gatewayResolution.candidates.filter(c => c.free && isVerifiedFreeModel(c.model));
+        return gatewayResolution.candidates.filter(c => c.free && isVerifiedFreeModelForGateway(c.model, c.gateway));
       })();
 
       const primaryModelName = candidateModels[0]?.model ?? 'openrouter/free';
