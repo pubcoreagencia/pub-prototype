@@ -118,7 +118,10 @@ export const createPpApp = (
     next();
   });
 
-  app.use(express.json());
+  // INFRASTRUCTURE_BODY_LIMIT: protects against infrastructure-level DDoS/OOM payloads (default 10mb)
+  // PROMPT_CHARACTER_LIMIT: NONE (application imposes no artificial length limit on user prompts)
+  const infrastructureBodyLimit = process.env.INFRASTRUCTURE_BODY_LIMIT || '10mb';
+  app.use(express.json({ limit: infrastructureBodyLimit }));
 
   // API Rate Limiting for sensitive endpoints
   const sessionRateLimiter = rateLimit({
@@ -689,7 +692,7 @@ export const createPpApp = (
       const session = await protoRepo.getSession(String(req.params.id));
       if (!session) return res.sendStatus(404);
       const { objective = 'Prototype MVP iteration', prompt, priority } = req.body ?? {};
-      if (!prompt) return res.status(400).json({ error: 'prompt is required' });
+      if (typeof prompt !== 'string' || !prompt.trim()) return res.status(400).json({ error: 'prompt is required' });
       if (['BUILDING', 'PREVIEWING'].includes(session.status)) return res.status(409).json({ error: 'Prototype session is already processing a prompt' });
       const updated = await protoRepo.incrementPromptCount(session.id);
       if (!updated) return res.sendStatus(409);
