@@ -4,7 +4,7 @@ import type { ProviderTaskInput, ProviderTaskResult } from '../types.js';
 import type { StreamConsumer } from '../streaming/index.js';
 import { OpenRouterProvider } from '../openrouter.js';
 import type { GatewayProvider, GatewayKind, GatewayHealthResult, GatewayModelInfo } from './types.js';
-import { assertFreeModel } from '../../routing/registry.js';
+import { assertFreeModel, assertVerifiedFreeModel } from '../../routing/registry.js';
 import { DEFAULT_OPENROUTER_BASE_URL, normalizeBaseUrl, resolveOpenRouterApiKey } from '../shared.js';
 
 export class OpenRouterGatewayAdapter implements GatewayProvider {
@@ -30,7 +30,7 @@ export class OpenRouterGatewayAdapter implements GatewayProvider {
   ): Promise<ProviderTaskResult> {
     const effectiveModel = options?.modelOverride ?? (task as any).modelOverride ?? this.model;
     if (effectiveModel) {
-      assertFreeModel(effectiveModel);
+      assertVerifiedFreeModel(effectiveModel);
     }
     const taskInput: ProviderTaskInput = {
       ...task,

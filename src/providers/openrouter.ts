@@ -6,7 +6,7 @@ import { ToolRuntime } from '../tools/runtime.js';
 import { AgentExecutor } from '../executor.js';
 import type { ToolCall, ToolResult, ToolExecutionContext, ToolDefinition } from '../tools/types.js';
 import { loadOpenRouterConfig, type OpenRouterConfig } from './openrouterConfig.js';
-import { canUsePaidFallback, isFreeModel } from '../routing/index.js';
+import { canUsePaidFallback, isFreeModel, isVerifiedFreeModel } from '../routing/index.js';
 import { parseOpenAISSEStream, type StreamConsumer, StreamEventSink } from './streaming/index.js';
 
 
@@ -153,25 +153,47 @@ export class OpenRouterProvider implements AgentProvider {
     const modelAttempts: string[] = [];
 
     // Check for explicit paid modelOverride rejection:
-    if ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim() && !isFreeModel(task.modelOverride)) {
-      clearTimeout(timer);
-      const paidModel = task.modelOverride.trim();
-      return {
-        status: 'FAILED',
-        provider: this.kind,
-        model: paidModel,
-        exitCode: null,
-        durationMs: Date.now() - started,
-        stdout: '',
-        stderr: `PAID_MODEL_FORBIDDEN: PP execution is strictly 100% FREE. Execution of paid model '${paidModel}' is prohibited.`,
-        changedFiles: runtime.getChangedFiles(),
-        commit: null,
-        errorCode: 'PAID_MODEL_FORBIDDEN',
-        errorMessage: `PAID_MODEL_FORBIDDEN: PP execution is strictly 100% FREE. Execution of paid model '${paidModel}' is prohibited.`,
-        toolCalls: 0,
-        toolRounds: 0,
-        modelAttempts: [paidModel],
-      };
+    if ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim()) {
+      const overrideModel = task.modelOverride.trim();
+      if (!isFreeModel(overrideModel)) {
+        clearTimeout(timer);
+        return {
+          status: 'FAILED',
+          provider: this.kind,
+          model: overrideModel,
+          exitCode: null,
+          durationMs: Date.now() - started,
+          stdout: '',
+          stderr: `PAID_MODEL_FORBIDDEN: PP execution is strictly 100% FREE. Execution of paid model '${overrideModel}' is prohibited.`,
+          changedFiles: runtime.getChangedFiles(),
+          commit: null,
+          errorCode: 'PAID_MODEL_FORBIDDEN',
+          errorMessage: `PAID_MODEL_FORBIDDEN: PP execution is strictly 100% FREE. Execution of paid model '${overrideModel}' is prohibited.`,
+          toolCalls: 0,
+          toolRounds: 0,
+          modelAttempts: [overrideModel],
+        };
+      }
+
+      if (!isVerifiedFreeModel(overrideModel)) {
+        clearTimeout(timer);
+        return {
+          status: 'FAILED',
+          provider: this.kind,
+          model: overrideModel,
+          exitCode: null,
+          durationMs: Date.now() - started,
+          stdout: '',
+          stderr: `UNVERIFIED_FREE_MODEL_FORBIDDEN: Model '${overrideModel}' is not in the active verified FREE catalog. PP strictly rejects unverified models prior to network execution.`,
+          changedFiles: runtime.getChangedFiles(),
+          commit: null,
+          errorCode: 'UNVERIFIED_FREE_MODEL_FORBIDDEN',
+          errorMessage: `UNVERIFIED_FREE_MODEL_FORBIDDEN: Model '${overrideModel}' is not in the active verified FREE catalog. PP strictly rejects unverified models prior to network execution.`,
+          toolCalls: 0,
+          toolRounds: 0,
+          modelAttempts: [overrideModel],
+        };
+      }
     }
 
     // Filter candidateEntries strictly to FREE models only.

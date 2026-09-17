@@ -40,13 +40,13 @@ describe('OpenRouterProvider – modelOverride & Streaming Contract', () => {
       id: 'task-1',
       objective: 'test',
       prompt: 'Hello',
-      modelOverride: 'minimax/minimax-m2.7:free',
+      modelOverride: 'qwen/qwen3.8-27b:free',
     };
 
     const res = await provider.execute(task, '/tmp');
     expect(res.status).toBe('COMPLETED');
     expect(capturedBody).not.toBeNull();
-    expect(capturedBody.model).toBe('minimax/minimax-m2.7:free');
+    expect(capturedBody.model).toBe('qwen/qwen3.8-27b:free');
   });
 
 

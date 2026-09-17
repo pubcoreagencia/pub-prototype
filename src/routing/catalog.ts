@@ -1,6 +1,6 @@
 // src/routing/catalog.ts
 import type { GatewayCandidate, GatewayKind } from '../providers/gateway/types.js';
-import { isFreeModel } from './registry.js';
+import { isFreeModel, isVerifiedFreeModel } from './registry.js';
 
 /**
  * 10 Live-Verified FREE models for Gateway A (OpenRouter).
@@ -99,9 +99,9 @@ export function resolveGatewayCandidates(
 
   const retries = options?.maxRetries ?? 1;
 
-  if (options?.modelOverride && isFreeModel(options.modelOverride)) {
+  if (options?.modelOverride && isVerifiedFreeModel(options.modelOverride)) {
     const override = options.modelOverride.trim();
-    const isRouter = routerStatus.verifiedFreeModels.includes(override) || override.startsWith('router/');
+    const isRouter = routerStatus.verifiedFreeModels.includes(override) || override.startsWith('kc/') || override.startsWith('router/');
     const single: GatewayCandidate = {
       gateway: isRouter ? '9router' : 'openrouter',
       model: override,

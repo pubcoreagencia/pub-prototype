@@ -5,7 +5,7 @@ import type { StreamConsumer } from '../providers/streaming/index.js';
 import type { GatewayCandidate, GatewayKind, GatewayProvider } from '../providers/gateway/types.js';
 import { OpenRouterGatewayAdapter } from '../providers/gateway/openrouter-gateway.js';
 import { RouterGatewayAdapter } from '../providers/gateway/router-gateway.js';
-import { assertFreeModel, isFreeModel } from './registry.js';
+import { assertFreeModel, assertVerifiedFreeModel, isFreeModel, isVerifiedFreeModel } from './registry.js';
 import { resolveGatewayCandidates, type GatewayCatalogStatus } from './catalog.js';
 
 export interface GatewayRouterOptions {
@@ -130,7 +130,13 @@ export class GatewayRouter implements AgentProvider {
       openRouterModels: this.configuredOpenRouterModels,
       routerModels: this.configuredRouterModels,
     });
-    const valid = candidates.filter(c => isFreeModel(c.model) && this.isModelAvailable(c.model));
+    const allowedExplicit = new Set([
+      ...(this.configuredOpenRouterModels ?? []),
+      ...(this.configuredRouterModels ?? []),
+    ]);
+    const valid = candidates.filter(
+      c => (isVerifiedFreeModel(c.model) || (allowedExplicit.has(c.model) && isFreeModel(c.model))) && this.isModelAvailable(c.model)
+    );
     return {
       candidates: valid,
       catalogReport,
@@ -153,7 +159,7 @@ export class GatewayRouter implements AgentProvider {
       : undefined;
 
     if (modelOverride) {
-      assertFreeModel(modelOverride);
+      assertVerifiedFreeModel(modelOverride);
     }
 
     const { candidates, catalogReport } = this.getCandidates(modelOverride);
@@ -193,11 +199,19 @@ export class GatewayRouter implements AgentProvider {
     let activeGateway = candidates[0].gateway;
     this.emit('GATEWAY_SELECTED', { gateway: activeGateway, model: candidates[0].model });
 
+    const allowedExplicit = new Set([
+      ...(this.configuredOpenRouterModels ?? []),
+      ...(this.configuredRouterModels ?? []),
+    ]);
+
     for (let i = 0; i < candidates.length; i++) {
       const candidate = candidates[i];
 
-      // ABSOLUTE SECURITY GATE
+      // ABSOLUTE SECURITY GATE: Must be FREE and live-verified in catalog (or configured explicit free model)
       assertFreeModel(candidate.model);
+      if (!allowedExplicit.has(candidate.model)) {
+        assertVerifiedFreeModel(candidate.model);
+      }
 
       if (options?.signal?.aborted) {
         return {

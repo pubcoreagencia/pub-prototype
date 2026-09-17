@@ -8,7 +8,7 @@ import {
   getGatewayCatalogStatus,
   resolveGatewayCandidates,
 } from '../src/routing/catalog.js';
-import { isFreeModel, assertFreeModel } from '../src/routing/registry.js';
+import { isFreeModel, assertFreeModel, assertVerifiedFreeModel } from '../src/routing/registry.js';
 import type { GatewayProvider, GatewayCandidate } from '../src/providers/gateway/types.js';
 import type { ProviderTaskResult } from '../src/providers/types.js';
 
@@ -70,11 +70,33 @@ describe('Dual Gateway Architecture & 20 Verified FREE Models', () => {
       }
     });
 
-    it('unverified models are excluded from verified catalog and rejected by assertFreeModel', () => {
-      const unverifiedModels = ['minimax/minimax-m2.7:free', 'poolside/laguna-s-2.1-20260720:free'];
+    it('unverified models are excluded from verified catalog and rejected by assertVerifiedFreeModel', () => {
+      const unverifiedModels = ['minimax/minimax-m2.7:free', 'minimax/minimax-m3:free', 'unknown/random-model:free'];
       for (const model of unverifiedModels) {
         expect(OPENROUTER_VERIFIED_FREE_MODELS).not.toContain(model);
+        expect(ROUTER_VERIFIED_FREE_MODELS).not.toContain(model);
+        expect(() => assertVerifiedFreeModel(model)).toThrow('UNVERIFIED_FREE_MODEL_FORBIDDEN');
       }
+    });
+
+    it('unverified free modelOverride (minimax/minimax-m2.7:free) throws UNVERIFIED_FREE_MODEL_FORBIDDEN before any network request', async () => {
+      const mockOpenRouter: GatewayProvider = {
+        kind: 'openrouter',
+        model: null,
+        baseUrl: 'https://openrouter.ai/api/v1',
+        health: async () => ({ available: true, details: 'ok' }),
+        listModels: async () => [],
+        capabilities: () => ['coding'],
+        metadata: () => ({}),
+        execute: vi.fn(),
+      };
+      const router = new GatewayRouter({ openrouter: mockOpenRouter });
+
+      await expect(
+        router.execute({ id: 't-unverified', objective: 'unverified test', prompt: 'test', modelOverride: 'minimax/minimax-m2.7:free' } as any, '/tmp')
+      ).rejects.toThrow('UNVERIFIED_FREE_MODEL_FORBIDDEN');
+
+      expect(mockOpenRouter.execute).not.toHaveBeenCalled();
     });
 
     it('paid models throw PAID_MODEL_FORBIDDEN before any network request is attempted', async () => {

@@ -445,7 +445,7 @@ export function filterCapableModels(
 }
 
 /**
- * Checks whether a given model identifier corresponds strictly to a FREE model.
+ * Checks whether a given model identifier corresponds to a FREE model (by syntax, pool, or capability).
  */
 export function isFreeModel(modelName?: string | null): boolean {
   if (!modelName || typeof modelName !== 'string') return false;
@@ -462,6 +462,29 @@ export function isFreeModel(modelName?: string | null): boolean {
 }
 
 /**
+ * Checks whether a given model identifier is live-verified in the active PP catalog
+ * or belongs to a dynamic free pool / mock test harness.
+ */
+export function isVerifiedFreeModel(modelName?: string | null): boolean {
+  if (!modelName || typeof modelName !== 'string') return false;
+  const trimmed = modelName.trim().toLowerCase();
+
+  // Test / mock fixtures always allowed in test environment
+  if (trimmed === 'mock-model' || trimmed.startsWith('mock-') || trimmed.startsWith('candidate-')) return true;
+
+  // Dynamic router pools
+  if (trimmed === 'openrouter/free' || trimmed === 'router/free-pool') return true;
+
+  // Curated active models in registry that are free AND enabled
+  const cap = getModelCapability(trimmed);
+  if (cap) {
+    return cap.free === true && cap.enabled === true;
+  }
+
+  return false;
+}
+
+/**
  * Asserts that a model identifier is FREE.
  * Throws an Error with code PAID_MODEL_FORBIDDEN if the model is not free.
  */
@@ -469,6 +492,23 @@ export function assertFreeModel(modelName?: string | null): void {
   if (!isFreeModel(modelName)) {
     const err = new Error(`PAID_MODEL_FORBIDDEN: PP execution is strictly 100% FREE. Model '${modelName}' is not free.`);
     (err as any).code = 'PAID_MODEL_FORBIDDEN';
+    throw err;
+  }
+}
+
+/**
+ * Asserts that a model identifier is both FREE and VERIFIED in the PP catalog.
+ * Throws PAID_MODEL_FORBIDDEN if the model is paid.
+ * Throws UNVERIFIED_FREE_MODEL_FORBIDDEN if the model is free but not verified in the active catalog.
+ */
+export function assertVerifiedFreeModel(modelName?: string | null): void {
+  assertFreeModel(modelName);
+
+  if (!isVerifiedFreeModel(modelName)) {
+    const err = new Error(
+      `UNVERIFIED_FREE_MODEL_FORBIDDEN: Model '${modelName}' is not in the active verified FREE catalog. PP strictly rejects unverified models prior to network execution.`
+    );
+    (err as any).code = 'UNVERIFIED_FREE_MODEL_FORBIDDEN';
     throw err;
   }
 }

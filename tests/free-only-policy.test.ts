@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { isFreeModel, assertFreeModel } from '../src/routing/registry.js';
+import { isFreeModel, assertFreeModel, isVerifiedFreeModel, assertVerifiedFreeModel } from '../src/routing/registry.js';
 import { buildRoutingPolicy, resolveCandidateModels } from '../src/routing/engine.js';
 import { OpenRouterProvider } from '../src/providers/openrouter.js';
 import type { ProviderTaskInput } from '../src/providers/types.js';
@@ -12,24 +12,45 @@ describe('PP Free-Only Policy Enforcement', () => {
     vi.restoreAllMocks();
   });
 
-  describe('1. isFreeModel & assertFreeModel gates', () => {
-    it('accepts explicit :free models', () => {
+  describe('1. isFreeModel, isVerifiedFreeModel & assertion gates', () => {
+    it('accepts explicit :free models in isFreeModel syntax', () => {
       expect(isFreeModel('cohere/north-mini-code:free')).toBe(true);
       expect(isFreeModel('minimax/minimax-m2.7:free')).toBe(true);
       expect(isFreeModel('poolside/laguna-s-2.1-20260720:free')).toBe(true);
       expect(() => assertFreeModel('cohere/north-mini-code:free')).not.toThrow();
     });
 
+    it('distinguishes verified free models from unverified free models', () => {
+      // Verified active models
+      expect(isVerifiedFreeModel('cohere/north-mini-code:free')).toBe(true);
+      expect(isVerifiedFreeModel('nex-agi/nex-n2.5-pro:free')).toBe(true);
+      expect(isVerifiedFreeModel('openrouter/free')).toBe(true);
+      expect(isVerifiedFreeModel('router/free-pool')).toBe(true);
+      expect(isVerifiedFreeModel('kc/cohere/north-mini-code:free')).toBe(true);
+      expect(() => assertVerifiedFreeModel('cohere/north-mini-code:free')).not.toThrow();
+
+      // Unverified / disabled / removed free models
+      expect(isVerifiedFreeModel('minimax/minimax-m2.7:free')).toBe(false);
+      expect(isVerifiedFreeModel('minimax/minimax-m3:free')).toBe(false);
+      expect(isVerifiedFreeModel('unknown/random-model:free')).toBe(false);
+
+      expect(() => assertVerifiedFreeModel('minimax/minimax-m2.7:free')).toThrow('UNVERIFIED_FREE_MODEL_FORBIDDEN');
+    });
+
     it('accepts openrouter/free community pool', () => {
       expect(isFreeModel('openrouter/free')).toBe(true);
+      expect(isVerifiedFreeModel('openrouter/free')).toBe(true);
       expect(() => assertFreeModel('openrouter/free')).not.toThrow();
+      expect(() => assertVerifiedFreeModel('openrouter/free')).not.toThrow();
     });
 
     it('rejects paid models', () => {
       expect(isFreeModel('openai/gpt-4o-mini')).toBe(false);
+      expect(isVerifiedFreeModel('openai/gpt-4o-mini')).toBe(false);
       expect(isFreeModel('anthropic/claude-3.5-haiku')).toBe(false);
       expect(isFreeModel('deepseek/deepseek-chat')).toBe(false);
       expect(() => assertFreeModel('openai/gpt-4o-mini')).toThrow('PAID_MODEL_FORBIDDEN');
+      expect(() => assertVerifiedFreeModel('openai/gpt-4o-mini')).toThrow('PAID_MODEL_FORBIDDEN');
     });
   });
 
@@ -116,6 +137,32 @@ describe('PP Free-Only Policy Enforcement', () => {
       expect(res.status).toBe('FAILED');
       expect(res.errorCode).toBe('PAID_MODEL_FORBIDDEN');
       expect(res.errorMessage).toContain('PAID_MODEL_FORBIDDEN');
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('rejects unverified free modelOverride (minimax/minimax-m2.7:free) without sending any network request', async () => {
+      const fetchSpy = vi.fn();
+      global.fetch = fetchSpy;
+
+      const provider = new OpenRouterProvider(
+        undefined,
+        'sk-test-key',
+        5000,
+        'openrouter/free',
+        true
+      );
+
+      const task: ProviderTaskInput = {
+        id: 'test-unverified-task',
+        objective: 'test',
+        prompt: 'Hello',
+        modelOverride: 'minimax/minimax-m2.7:free', // UNVERIFIED / REMOVED FREE MODEL
+      };
+
+      const res = await provider.execute(task, '/tmp');
+      expect(res.status).toBe('FAILED');
+      expect(res.errorCode).toBe('UNVERIFIED_FREE_MODEL_FORBIDDEN');
+      expect(res.errorMessage).toContain('UNVERIFIED_FREE_MODEL_FORBIDDEN');
       expect(fetchSpy).not.toHaveBeenCalled();
     });
 
