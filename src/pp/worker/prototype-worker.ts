@@ -15,7 +15,9 @@ import { StreamEventSink } from '../../providers/streaming/index.js';
 import { OperationalEventBridge } from '../events/bridge.js';
 import { loadOpenRouterConfig } from '../../providers/openrouterConfig.js';
 import { classifyTaskProfile } from '../../routing/classifier.js';
+import { isFreeModel } from '../../routing/registry.js';
 import { CorrectionController } from './correction-controller.js';
+
 import { VerificationGate } from '../verification/verification-gate.js';
 import { VerificationRecoveryOrchestrator } from './verification-recovery-orchestrator.js';
 
@@ -328,8 +330,11 @@ export class PrototypeWorker {
           return null;
         }
       })();
-      const candidateModels = routingCfg?.candidateModels ?? [];
-      const primaryModelName = routingCfg?.primaryModel ?? (this.provider as any).model ?? 'default';
+      const rawCandidateModels = routingCfg?.candidateModels ?? [];
+      // STRICT SAFETY GATE: Enforce that all candidates are FREE models
+      const candidateModels = rawCandidateModels.filter(c => c.free && isFreeModel(c.model));
+      const primaryModelName = candidateModels[0]?.model ?? routingCfg?.primaryModel ?? 'openrouter/free';
+
 
       console.log(JSON.stringify({
         event: 'MODEL_ROUTING_SELECTED',
@@ -388,8 +393,14 @@ export class PrototypeWorker {
 
         const candidateEntry = candidateModels[attemptIdx];
         const candidateModel = candidateEntry?.model ?? primaryModelName;
+        // FINAL DEFENSIVE GATE: Reject any non-free model
+        if (!isFreeModel(candidateModel)) {
+          console.warn(`[PrototypeWorker] Skipping paid model '${candidateModel}': PP is strictly 100% FREE.`);
+          continue;
+        }
         lastAttemptModel = candidateModel;
         attemptedModels.push(candidateModel);
+
 
         if (attemptIdx > 0) {
           const prevModel = candidateModels[attemptIdx - 1]?.model ?? primaryModelName;

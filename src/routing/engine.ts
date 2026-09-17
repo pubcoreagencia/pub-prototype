@@ -5,7 +5,7 @@ import {
   type ModelRoutingPolicy,
   type TaskRoutingProfile,
 } from './types.js';
-import { MODEL_REGISTRY, filterCapableModels } from './registry.js';
+import { MODEL_REGISTRY, filterCapableModels, isFreeModel } from './registry.js';
 import { classifyTaskProfile } from './classifier.js';
 import { reorderTier1ModelsWithCalibration } from './calibration.js';
 import type { SystemObservabilityReport } from './observability.js';
@@ -35,15 +35,14 @@ export const DEFAULT_TIER1_MODELS: Record<TaskRoutingProfile, string[]> = {
 
 /**
  * Default Tier 3 Paid fallback models.
+ * NOTE: In PUB Prototype production, execution is strictly 100% FREE.
+ * Paid models are NEVER used for automatic fallback or task execution.
  */
-export const DEFAULT_PAID_MODELS = [
-  'openai/gpt-4o-mini',
-  'anthropic/claude-3.5-haiku',
-  'deepseek/deepseek-chat',
-];
+export const DEFAULT_PAID_MODELS: string[] = [];
 
 /**
  * Build a strongly-typed ModelRoutingPolicy from task and environment variables.
+ * Enforces PP_COST_POLICY: 100% FREE execution. Paid fallback is disabled.
  */
 export function buildRoutingPolicy(
   task?: Partial<Task> | { routingProfile?: TaskRoutingProfile; [key: string]: unknown },
@@ -56,17 +55,17 @@ export function buildRoutingPolicy(
   const envTier1 = env.OPENROUTER_TIER1_MODELS?.trim();
   let tier1ExplicitFree: string[];
   if (envTier1) {
-    tier1ExplicitFree = envTier1.split(',').map(s => s.trim()).filter(Boolean);
+    tier1ExplicitFree = envTier1.split(',').map(s => s.trim()).filter(m => Boolean(m) && isFreeModel(m));
   } else {
-    tier1ExplicitFree = [...DEFAULT_TIER1_MODELS[profile]];
+    tier1ExplicitFree = [...DEFAULT_TIER1_MODELS[profile]].filter(isFreeModel);
   }
 
   // Tier 2: OpenRouter Free Pool ('openrouter/free') as safety net
   const tier2OpenRouterFreePool = env.OPENROUTER_FREE_POOL_ENABLED !== 'false';
 
-  // Tier 3: Paid Fallback (Strictly guarded, enabled by default when API key is present unless explicitly disabled)
-  const hasKey = Boolean(env.OPENROUTER_API_KEY?.trim());
-  const paidEnabled = env.OPENROUTER_PAID_FALLBACK_ENABLED === 'true' || (hasKey && env.OPENROUTER_PAID_FALLBACK_ENABLED !== 'false');
+  // Tier 3: Paid Fallback is FORBIDDEN by PP policy (100% FREE).
+  // Account balance serves only to remove daily request limits, never for paid model execution.
+  const paidEnabled = env.OPENROUTER_PAID_FALLBACK_ENABLED === 'true' && env.PP_ALLOW_PAID_MODELS === 'true';
   const envTier3 = env.OPENROUTER_PAID_MODELS?.trim();
   let tier3PaidFallback: string[] = [];
   if (paidEnabled) {
@@ -78,10 +77,10 @@ export function buildRoutingPolicy(
   }
 
   const maxRetriesPerModel = Math.max(1, Number(env.OPENROUTER_MAX_RETRIES ?? 2));
-  const maxPaidAttempts = Math.max(0, Number(env.OPENROUTER_PAID_MAX_ATTEMPTS ?? 1));
+  const maxPaidAttempts = paidEnabled ? Math.max(0, Number(env.OPENROUTER_PAID_MAX_ATTEMPTS ?? 1)) : 0;
   const maxCostPerTaskUsd = env.OPENROUTER_MAX_COST_PER_TASK_USD
     ? Number(env.OPENROUTER_MAX_COST_PER_TASK_USD)
-    : 0.25;
+    : 0;
   const baseDelayMs = Math.max(0, Number(env.OPENROUTER_RETRY_BASE_DELAY_MS ?? 500));
   const minContextTokens = Number(env.OPENROUTER_MIN_CONTEXT_TOKENS ?? 32768);
 
@@ -111,7 +110,8 @@ export function buildRoutingPolicy(
  * Sequence:
  * 1. Tier 1 Curated Free Models (filtered by capability)
  * 2. Tier 2 OpenRouter Free Pool (if enabled)
- * 3. Tier 3 Paid Fallback Models (if enabled and guarded)
+ *
+ * ALL candidates returned MUST be FREE models.
  */
 export function resolveCandidateModels(
   policy: ModelRoutingPolicy,
@@ -119,36 +119,42 @@ export function resolveCandidateModels(
   env: NodeJS.ProcessEnv = process.env,
   observabilityReport?: SystemObservabilityReport
 ): CandidateModelEntry[] {
-  // If a specific explicit model override is requested (e.g., via CLI, test or OPENROUTER_MODEL env), honor it directly
+  // If a specific explicit model override is requested, enforce that it is FREE
   const explicitModel = legacyModelOverride || (env.OPENROUTER_MODEL && env.OPENROUTER_MODEL !== 'openrouter/free' ? env.OPENROUTER_MODEL : undefined);
   if (explicitModel && explicitModel !== 'openrouter/free') {
-    const isFree = explicitModel.includes(':free') || explicitModel.endsWith('/free');
-    const result: CandidateModelEntry[] = [
-      {
-        model: explicitModel,
-        tier: isFree ? 1 : 3,
-        free: isFree,
-        maxRetries: policy.limits.maxRetriesPerModel,
-      },
-    ];
-
-    // Also append legacy OPENROUTER_FALLBACK_MODELS if provided
-    const fallbackRaw = env.OPENROUTER_FALLBACK_MODELS?.trim();
-    if (fallbackRaw) {
-      const extraFallbacks = fallbackRaw.split(',').map(s => s.trim()).filter(Boolean);
-      for (const fb of extraFallbacks) {
-        const fbFree = fb.includes(':free') || fb.endsWith('/free');
-        result.push({
-          model: fb,
-          tier: fb === 'openrouter/free' ? 2 : fbFree ? 1 : 3,
-          free: fbFree,
+    // SECURITY GATE: Only accept explicit model override if it is a FREE model!
+    if (!isFreeModel(explicitModel)) {
+      console.warn(`[RoutingPolicy] Rejected paid model override '${explicitModel}': PP execution is strictly 100% FREE.`);
+    } else {
+      const result: CandidateModelEntry[] = [
+        {
+          model: explicitModel,
+          tier: 1,
+          free: true,
           maxRetries: policy.limits.maxRetriesPerModel,
-        });
-      }
-    }
+        },
+      ];
 
-    return result;
+      // Also append legacy OPENROUTER_FALLBACK_MODELS if provided and FREE
+      const fallbackRaw = env.OPENROUTER_FALLBACK_MODELS?.trim();
+      if (fallbackRaw) {
+        const extraFallbacks = fallbackRaw.split(',').map(s => s.trim()).filter(Boolean);
+        for (const fb of extraFallbacks) {
+          if (isFreeModel(fb)) {
+            result.push({
+              model: fb,
+              tier: fb === 'openrouter/free' ? 2 : 1,
+              free: true,
+              maxRetries: policy.limits.maxRetriesPerModel,
+            });
+          }
+        }
+      }
+
+      return result;
+    }
   }
+
 
   const candidates: CandidateModelEntry[] = [];
 
@@ -188,27 +194,10 @@ export function resolveCandidateModels(
     });
   }
 
-  // 3. Tier 3: Guarded Paid Fallback
-  if (policy.tiers.tier3PaidFallback.length > 0 && policy.limits.maxPaidAttempts > 0) {
-    const validTier3 = filterCapableModels(policy.tiers.tier3PaidFallback, {
-      requireToolCalling: policy.capabilities.requireToolCalling,
-      minContextTokens: policy.capabilities.minContextTokens,
-      profile: policy.profile,
-    });
-
-    const maxPaid = Math.min(validTier3.length, policy.limits.maxPaidAttempts);
-    for (let i = 0; i < maxPaid; i++) {
-      candidates.push({
-        model: validTier3[i],
-        tier: 3,
-        free: false,
-        maxRetries: 1, // Paid attempts are single-shot by default to protect budget
-      });
-    }
-  }
-
-  return candidates;
+  // Final Safety Gate: Guarantee that all candidates returned are strictly FREE models
+  return candidates.filter(c => c.free && isFreeModel(c.model));
 }
+
 
 /**
  * Budget and Paid Fallback Guard.

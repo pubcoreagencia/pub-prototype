@@ -168,3 +168,36 @@ export function filterCapableModels(
     return true;
   });
 }
+
+/**
+ * Checks whether a given model identifier corresponds strictly to a FREE model.
+ * 
+ * Rules:
+ * 1. Model contains ':free' or ends with '/free' (e.g. 'cohere/north-mini-code:free', 'openrouter/free')
+ * 2. Or model is explicitly registered in MODEL_REGISTRY with free === true
+ * 3. All other models (including any paid models like 'openai/gpt-4o-mini', 'anthropic/claude-3.5-haiku', etc.) return false.
+ */
+export function isFreeModel(modelName?: string | null): boolean {
+  if (!modelName || typeof modelName !== 'string') return false;
+  const trimmed = modelName.trim().toLowerCase();
+  if (trimmed === 'openrouter/free') return true;
+  if (trimmed.includes(':free') || trimmed.endsWith('/free')) return true;
+
+  const cap = getModelCapability(trimmed);
+  if (cap && cap.free === true) return true;
+
+  return false;
+}
+
+/**
+ * Asserts that a model identifier is FREE.
+ * Throws an Error with code PAID_MODEL_FORBIDDEN if the model is not free.
+ */
+export function assertFreeModel(modelName?: string | null): void {
+  if (!isFreeModel(modelName)) {
+    const err = new Error(`PAID_MODEL_FORBIDDEN: PP execution is strictly 100% FREE. Model '${modelName}' is not free.`);
+    (err as any).code = 'PAID_MODEL_FORBIDDEN';
+    throw err;
+  }
+}
+

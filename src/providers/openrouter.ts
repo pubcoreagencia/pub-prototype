@@ -6,8 +6,9 @@ import { ToolRuntime } from '../tools/runtime.js';
 import { AgentExecutor } from '../executor.js';
 import type { ToolCall, ToolResult, ToolExecutionContext, ToolDefinition } from '../tools/types.js';
 import { loadOpenRouterConfig, type OpenRouterConfig } from './openrouterConfig.js';
-import { canUsePaidFallback } from '../routing/index.js';
+import { canUsePaidFallback, isFreeModel } from '../routing/index.js';
 import { parseOpenAISSEStream, type StreamConsumer, StreamEventSink } from './streaming/index.js';
+
 
 interface OpenAIChatMessage {
   role: string;
@@ -151,9 +152,30 @@ export class OpenRouterProvider implements AgentProvider {
     // Ordered list of model identifiers that will be attempted (one entry per candidate model)
     const modelAttempts: string[] = [];
 
-    // When an explicit modelOverride is provided for this attempt, execute strictly that candidate
-    // to prevent duplicate routing or unexpected candidate resets inside the provider.
-    const candidateEntries = ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim())
+    // Check for explicit paid modelOverride rejection:
+    if ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim() && !isFreeModel(task.modelOverride)) {
+      clearTimeout(timer);
+      const paidModel = task.modelOverride.trim();
+      return {
+        status: 'FAILED',
+        provider: this.kind,
+        model: paidModel,
+        exitCode: null,
+        durationMs: Date.now() - started,
+        stdout: '',
+        stderr: `PAID_MODEL_FORBIDDEN: PP execution is strictly 100% FREE. Execution of paid model '${paidModel}' is prohibited.`,
+        changedFiles: runtime.getChangedFiles(),
+        commit: null,
+        errorCode: 'PAID_MODEL_FORBIDDEN',
+        errorMessage: `PAID_MODEL_FORBIDDEN: PP execution is strictly 100% FREE. Execution of paid model '${paidModel}' is prohibited.`,
+        toolCalls: 0,
+        toolRounds: 0,
+        modelAttempts: [paidModel],
+      };
+    }
+
+    // Filter candidateEntries strictly to FREE models only.
+    const rawCandidateEntries = ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim())
       ? [
           {
             model: task.modelOverride.trim(),
@@ -172,34 +194,45 @@ export class OpenRouterProvider implements AgentProvider {
           };
         }));
 
+    const candidateEntries = rawCandidateEntries.filter(entry => isFreeModel(entry.model));
+
+    if (candidateEntries.length === 0) {
+      clearTimeout(timer);
+      return {
+        status: 'FAILED',
+        provider: this.kind,
+        model: null,
+        exitCode: null,
+        durationMs: Date.now() - started,
+        stdout: '',
+        stderr: 'PAID_MODEL_FORBIDDEN: No eligible FREE models found for execution.',
+        changedFiles: runtime.getChangedFiles(),
+        commit: null,
+        errorCode: 'PAID_MODEL_FORBIDDEN',
+        errorMessage: 'PAID_MODEL_FORBIDDEN: PP execution is strictly 100% FREE. No eligible free models available.',
+        toolCalls: 0,
+        toolRounds: 0,
+        modelAttempts: [],
+      };
+    }
 
     try {
       while (toolRounds < this.maxToolRounds) {
         let modelFound = false;
         for (const entry of candidateEntries) {
           const model = entry.model;
-          const isPaid = !entry.free;
-
-          // Cost Guard: verify if paid fallback is permitted before calling
-          const isFallbackPaid = isPaid && entry.model !== cfg.primaryModel;
-          if (isPaid && cfg.policy) {
-            if (cfg.policy.limits.maxCostPerTaskUsd !== undefined && (accumulatedCostUsd ?? 0) >= cfg.policy.limits.maxCostPerTaskUsd) {
-              continue; // Skip paid model if task budget is exhausted
-            }
-            if (isFallbackPaid && !canUsePaidFallback(cfg.policy, paidAttemptsUsed, accumulatedCostUsd ?? 0)) {
-              continue; // Skip paid fallback if fallback policy prohibits it
-            }
+          if (!isFreeModel(model)) {
+            continue; // Final safety gate against non-free models
           }
+          const isPaid = false; // Always false in 100% free mode
 
-          if (isPaid) {
-            paidAttemptsUsed++;
-          }
           // Record this candidate model as attempted (once per model)
           modelAttempts.push(entry.model);
           let attempt = 0;
-          const retriesForModel = isPaid ? 1 : entry.maxRetries;
+          const retriesForModel = entry.maxRetries;
 
           while (attempt < retriesForModel) {
+
             attempt++;
             const requestBody: Record<string, unknown> = {
               model,

@@ -40,14 +40,15 @@ describe('OpenRouterProvider – modelOverride & Streaming Contract', () => {
       id: 'task-1',
       objective: 'test',
       prompt: 'Hello',
-      modelOverride: 'openai/gpt-4o-mini',
+      modelOverride: 'minimax/minimax-m2.7:free',
     };
 
     const res = await provider.execute(task, '/tmp');
     expect(res.status).toBe('COMPLETED');
     expect(capturedBody).not.toBeNull();
-    expect(capturedBody.model).toBe('openai/gpt-4o-mini');
+    expect(capturedBody.model).toBe('minimax/minimax-m2.7:free');
   });
+
 
   it('2. task.modelOverride executes ONLY the requested candidate without duplicate routing', async () => {
     const modelsAttempted: string[] = [];
@@ -128,8 +129,9 @@ describe('OpenRouterProvider – modelOverride & Streaming Contract', () => {
       id: 'task-3',
       objective: 'test',
       prompt: 'Hello',
-      modelOverride: 'openai/gpt-4o-mini',
+      modelOverride: 'cohere/north-mini-code:free',
     };
+
 
     const res = await provider.execute(task, '/tmp', { consumer: sink });
     expect(res.status).toBe('COMPLETED');
