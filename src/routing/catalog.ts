@@ -1,6 +1,6 @@
 // src/routing/catalog.ts
 import type { GatewayCandidate, GatewayKind } from '../providers/gateway/types.js';
-import { isFreeModel, isVerifiedFreeModel } from './registry.js';
+import { isFreeModel, isVerifiedFreeModel, isVerifiedFreeModelForGateway } from './registry.js';
 import {
   OPENROUTER_VERIFIED_FREE_MODELS,
   ROUTER_KNOWN_MODELS,
@@ -30,7 +30,7 @@ export function getGatewayCatalogStatus(
     : ROUTER_VERIFIED_FREE_MODELS;
 
   const candidateList = activeModels !== undefined ? activeModels : defaultList;
-  const verified = candidateList.filter((m: string) => isVerifiedFreeModel(m));
+  const verified = candidateList.filter((m: string) => isVerifiedFreeModelForGateway(m, gateway));
 
   const degraded = verified.length < 10;
   return {
@@ -58,7 +58,7 @@ export function resolveGatewayCandidates(
 
   if (options?.modelOverride && isVerifiedFreeModel(options.modelOverride)) {
     const override = options.modelOverride.trim();
-    const isRouter = routerStatus.verifiedFreeModels.includes(override) || override.startsWith('kc/') || override.startsWith('router/');
+    const isRouter = isVerifiedFreeModelForGateway(override, '9router');
     const single: GatewayCandidate = {
       gateway: isRouter ? '9router' : 'openrouter',
       model: override,

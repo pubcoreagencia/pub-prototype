@@ -8,7 +8,14 @@ import {
   getGatewayCatalogStatus,
   resolveGatewayCandidates,
 } from '../src/routing/catalog.js';
-import { isFreeModel, assertFreeModel, assertVerifiedFreeModel } from '../src/routing/registry.js';
+import {
+  isFreeModel,
+  assertFreeModel,
+  assertVerifiedFreeModel,
+  assertVerifiedFreeModelForGateway,
+} from '../src/routing/registry.js';
+import { OpenRouterGatewayAdapter } from '../src/providers/gateway/openrouter-gateway.js';
+import { RouterGatewayAdapter } from '../src/providers/gateway/router-gateway.js';
 import type { GatewayProvider, GatewayCandidate } from '../src/providers/gateway/types.js';
 import type { ProviderTaskResult } from '../src/providers/types.js';
 
@@ -59,6 +66,39 @@ describe('Dual Gateway Architecture & 20 Verified FREE Models', () => {
       expect(degradedStatus.status).toBe('FREE_CATALOG_DEGRADED');
       expect(degradedStatus.totalModels).toBe(1);
     });
+
+    it('enforces gateway-scoped catalog validation: 9router model in OpenRouter is not verified', () => {
+      const status = getGatewayCatalogStatus('openrouter', ['kc/cohere/north-mini-code:free']);
+      expect(status.verifiedFreeModels).toHaveLength(0);
+      expect(status.totalModels).toBe(0);
+      expect(status.degraded).toBe(true);
+      expect(status.status).toBe('FREE_CATALOG_DEGRADED');
+    });
+
+    it('enforces gateway-scoped catalog validation: OpenRouter model in 9router is not verified', () => {
+      const status = getGatewayCatalogStatus('9router', ['cohere/north-mini-code:free']);
+      expect(status.verifiedFreeModels).toHaveLength(0);
+      expect(status.totalModels).toBe(0);
+      expect(status.degraded).toBe(true);
+      expect(status.status).toBe('FREE_CATALOG_DEGRADED');
+    });
+
+    it('resolveGatewayCandidates ensures openRouterModels only produces openrouter candidates and routerModels only produces 9router candidates', () => {
+      const resolution = resolveGatewayCandidates('openrouter', {
+        openRouterModels: ['cohere/north-mini-code:free', 'kc/cohere/north-mini-code:free'], // kc model should be rejected for openrouter
+        routerModels: ['kc/cohere/north-mini-code:free', 'cohere/north-mini-code:free'], // openrouter model should be rejected for 9router
+      });
+
+      // openrouter candidates must only be openrouter verified
+      const orCandidates = resolution.candidates.filter(c => c.gateway === 'openrouter');
+      expect(orCandidates).toHaveLength(1);
+      expect(orCandidates[0].model).toBe('cohere/north-mini-code:free');
+
+      // 9router candidates must only be 9router verified
+      const routerCandidates = resolution.candidates.filter(c => c.gateway === '9router');
+      expect(routerCandidates).toHaveLength(1);
+      expect(routerCandidates[0].model).toBe('kc/cohere/north-mini-code:free');
+    });
   });
 
   describe('2. Paid Model Prohibition Gate', () => {
@@ -99,31 +139,44 @@ describe('Dual Gateway Architecture & 20 Verified FREE Models', () => {
       expect(mockOpenRouter.execute).not.toHaveBeenCalled();
     });
 
-    it('explicitly configured unverified free models are filtered out from candidates and never executed', async () => {
-      const mockOpenRouter: GatewayProvider = {
-        kind: 'openrouter',
-        model: null,
-        baseUrl: 'https://openrouter.ai/api/v1',
-        health: async () => ({ available: true, details: 'ok' }),
-        listModels: async () => [],
-        capabilities: () => ['coding'],
-        metadata: () => ({}),
-        execute: vi.fn(),
-      };
-
-      const router = new GatewayRouter({
-        openrouter: mockOpenRouter,
-        openRouterModels: ['google/gemma-4-26b-a4b-it:free', 'poolside/laguna-s-2.1:free'],
-        routerModels: [],
+    it('modelOverride OpenRouter resolves deterministically to gateway OpenRouter', () => {
+      const res = resolveGatewayCandidates('openrouter', {
+        modelOverride: 'cohere/north-mini-code:free',
       });
+      expect(res.candidates).toHaveLength(1);
+      expect(res.candidates[0].gateway).toBe('openrouter');
+      expect(res.candidates[0].model).toBe('cohere/north-mini-code:free');
+    });
 
-      const { candidates } = router.getCandidates();
-      expect(candidates).toHaveLength(0);
+    it('modelOverride 9router resolves deterministically to gateway 9router', () => {
+      const res = resolveGatewayCandidates('openrouter', {
+        modelOverride: 'kc/cohere/north-mini-code:free',
+      });
+      expect(res.candidates).toHaveLength(1);
+      expect(res.candidates[0].gateway).toBe('9router');
+      expect(res.candidates[0].model).toBe('kc/cohere/north-mini-code:free');
+    });
 
-      const res = await router.execute({ id: 't-no-cand', objective: 'test', prompt: 'test' }, '/tmp');
-      expect(res.status).toBe('FAILED');
-      expect(res.errorCode).toBe('ROUTING_EXHAUSTED');
-      expect(mockOpenRouter.execute).not.toHaveBeenCalled();
+    it('OpenRouter model on 9router adapter is BLOCKED before network', async () => {
+      const adapter = new RouterGatewayAdapter();
+      await expect(
+        adapter.execute({ id: 't-cross', objective: 'cross-test', prompt: 'test', modelOverride: 'cohere/north-mini-code:free' } as any, '/tmp')
+      ).rejects.toThrow('UNVERIFIED_FREE_MODEL_FORBIDDEN');
+
+      expect(() =>
+        assertVerifiedFreeModelForGateway('cohere/north-mini-code:free', '9router')
+      ).toThrow('UNVERIFIED_FREE_MODEL_FORBIDDEN');
+    });
+
+    it('9router model on OpenRouter adapter is BLOCKED before network', async () => {
+      const adapter = new OpenRouterGatewayAdapter();
+      await expect(
+        adapter.execute({ id: 't-cross2', objective: 'cross-test', prompt: 'test', modelOverride: 'kc/cohere/north-mini-code:free' } as any, '/tmp')
+      ).rejects.toThrow('UNVERIFIED_FREE_MODEL_FORBIDDEN');
+
+      expect(() =>
+        assertVerifiedFreeModelForGateway('kc/cohere/north-mini-code:free', 'openrouter')
+      ).toThrow('UNVERIFIED_FREE_MODEL_FORBIDDEN');
     });
   });
 

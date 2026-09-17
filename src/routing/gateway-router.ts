@@ -5,7 +5,14 @@ import type { StreamConsumer } from '../providers/streaming/index.js';
 import type { GatewayCandidate, GatewayKind, GatewayProvider } from '../providers/gateway/types.js';
 import { OpenRouterGatewayAdapter } from '../providers/gateway/openrouter-gateway.js';
 import { RouterGatewayAdapter } from '../providers/gateway/router-gateway.js';
-import { assertFreeModel, assertVerifiedFreeModel, isFreeModel, isVerifiedFreeModel } from './registry.js';
+import {
+  assertFreeModel,
+  assertVerifiedFreeModel,
+  assertVerifiedFreeModelForGateway,
+  isFreeModel,
+  isVerifiedFreeModel,
+  isVerifiedFreeModelForGateway,
+} from './registry.js';
 import { resolveGatewayCandidates, type GatewayCatalogStatus } from './catalog.js';
 
 export interface GatewayRouterOptions {
@@ -131,7 +138,7 @@ export class GatewayRouter implements AgentProvider {
       routerModels: this.configuredRouterModels,
     });
     const valid = candidates.filter(
-      c => isVerifiedFreeModel(c.model) && this.isModelAvailable(c.model)
+      c => isVerifiedFreeModelForGateway(c.model, c.gateway) && this.isModelAvailable(c.model)
     );
     return {
       candidates: valid,
@@ -198,9 +205,9 @@ export class GatewayRouter implements AgentProvider {
     for (let i = 0; i < candidates.length; i++) {
       const candidate = candidates[i];
 
-      // ABSOLUTE SECURITY GATE: Must be FREE and live-verified in catalog
+      // ABSOLUTE SECURITY GATE: Must be FREE and live-verified specifically for candidate.gateway
       assertFreeModel(candidate.model);
-      assertVerifiedFreeModel(candidate.model);
+      assertVerifiedFreeModelForGateway(candidate.model, candidate.gateway);
 
       if (options?.signal?.aborted) {
         return {

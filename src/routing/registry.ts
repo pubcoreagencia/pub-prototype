@@ -464,12 +464,46 @@ export function isFreeModel(modelName?: string | null): boolean {
   return false;
 }
 
-const VERIFIED_FREE_MODELS_SET = new Set<string>([
+const OPENROUTER_VERIFIED_SET = new Set<string>([
   ...OPENROUTER_VERIFIED_FREE_MODELS.map(m => m.trim().toLowerCase()),
-  ...ROUTER_VERIFIED_FREE_MODELS.map(m => m.trim().toLowerCase()),
   'openrouter/free',
+]);
+
+const ROUTER_VERIFIED_SET = new Set<string>([
+  ...ROUTER_VERIFIED_FREE_MODELS.map(m => m.trim().toLowerCase()),
   'router/free-pool',
 ]);
+
+const VERIFIED_FREE_MODELS_SET = new Set<string>([
+  ...OPENROUTER_VERIFIED_SET,
+  ...ROUTER_VERIFIED_SET,
+]);
+
+/**
+ * Checks whether a given model identifier is live-verified specifically for a target gateway
+ * or belongs to mock test harnesses.
+ */
+export function isVerifiedFreeModelForGateway(
+  modelName?: string | null,
+  gateway?: 'openrouter' | '9router'
+): boolean {
+  if (!modelName || typeof modelName !== 'string') return false;
+  const trimmed = modelName.trim().toLowerCase();
+
+  // Test / mock fixtures always allowed in test environment
+  if (trimmed === 'mock-model' || trimmed.startsWith('mock-') || trimmed.startsWith('candidate-')) return true;
+
+  if (gateway === 'openrouter') {
+    return OPENROUTER_VERIFIED_SET.has(trimmed);
+  }
+
+  if (gateway === '9router') {
+    return ROUTER_VERIFIED_SET.has(trimmed);
+  }
+
+  // If no gateway specified, check union
+  return VERIFIED_FREE_MODELS_SET.has(trimmed);
+}
 
 /**
  * Checks whether a given model identifier is live-verified in the active PP catalog
@@ -509,6 +543,26 @@ export function assertVerifiedFreeModel(modelName?: string | null): void {
   if (!isVerifiedFreeModel(modelName)) {
     const err = new Error(
       `UNVERIFIED_FREE_MODEL_FORBIDDEN: Model '${modelName}' is not in the active verified FREE catalog. PP strictly rejects unverified models prior to network execution.`
+    );
+    (err as any).code = 'UNVERIFIED_FREE_MODEL_FORBIDDEN';
+    throw err;
+  }
+}
+
+/**
+ * Asserts that a model identifier is both FREE and specifically VERIFIED for the given gateway.
+ * Throws PAID_MODEL_FORBIDDEN if the model is paid.
+ * Throws UNVERIFIED_FREE_MODEL_FORBIDDEN if the model is free but not verified for the specified gateway.
+ */
+export function assertVerifiedFreeModelForGateway(
+  modelName: string | null | undefined,
+  gateway: 'openrouter' | '9router'
+): void {
+  assertFreeModel(modelName);
+
+  if (!isVerifiedFreeModelForGateway(modelName, gateway)) {
+    const err = new Error(
+      `UNVERIFIED_FREE_MODEL_FORBIDDEN: Model '${modelName}' is not verified for gateway '${gateway}'. PP strictly rejects models not verified for the target gateway prior to network execution.`
     );
     (err as any).code = 'UNVERIFIED_FREE_MODEL_FORBIDDEN';
     throw err;

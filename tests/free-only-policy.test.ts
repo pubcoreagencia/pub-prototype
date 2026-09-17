@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { isFreeModel, assertFreeModel, isVerifiedFreeModel, assertVerifiedFreeModel } from '../src/routing/registry.js';
+import {
+  isFreeModel,
+  assertFreeModel,
+  isVerifiedFreeModel,
+  assertVerifiedFreeModel,
+  isVerifiedFreeModelForGateway,
+  assertVerifiedFreeModelForGateway,
+} from '../src/routing/registry.js';
 import { buildRoutingPolicy, resolveCandidateModels } from '../src/routing/engine.js';
 import { OpenRouterProvider } from '../src/providers/openrouter.js';
 import type { ProviderTaskInput } from '../src/providers/types.js';
@@ -45,6 +52,28 @@ describe('PP Free-Only Policy Enforcement', () => {
       expect(() => assertVerifiedFreeModel('minimax/minimax-m2.7:free')).toThrow('UNVERIFIED_FREE_MODEL_FORBIDDEN');
     });
 
+    it('enforces gateway-scoped verified free models strictly (isVerifiedFreeModelForGateway)', () => {
+      // 1. OpenRouter model -> OpenRouter: PASS
+      expect(isVerifiedFreeModelForGateway('cohere/north-mini-code:free', 'openrouter')).toBe(true);
+      expect(isVerifiedFreeModelForGateway('openrouter/free', 'openrouter')).toBe(true);
+      expect(() => assertVerifiedFreeModelForGateway('cohere/north-mini-code:free', 'openrouter')).not.toThrow();
+
+      // 2. 9router model -> 9router: PASS
+      expect(isVerifiedFreeModelForGateway('kc/cohere/north-mini-code:free', '9router')).toBe(true);
+      expect(isVerifiedFreeModelForGateway('router/free-pool', '9router')).toBe(true);
+      expect(() => assertVerifiedFreeModelForGateway('kc/cohere/north-mini-code:free', '9router')).not.toThrow();
+
+      // 3. OpenRouter model -> 9router: BLOCKED
+      expect(isVerifiedFreeModelForGateway('cohere/north-mini-code:free', '9router')).toBe(false);
+      expect(isVerifiedFreeModelForGateway('openrouter/free', '9router')).toBe(false);
+      expect(() => assertVerifiedFreeModelForGateway('cohere/north-mini-code:free', '9router')).toThrow('UNVERIFIED_FREE_MODEL_FORBIDDEN');
+
+      // 4. 9router model -> OpenRouter: BLOCKED
+      expect(isVerifiedFreeModelForGateway('kc/cohere/north-mini-code:free', 'openrouter')).toBe(false);
+      expect(isVerifiedFreeModelForGateway('router/free-pool', 'openrouter')).toBe(false);
+      expect(() => assertVerifiedFreeModelForGateway('kc/cohere/north-mini-code:free', 'openrouter')).toThrow('UNVERIFIED_FREE_MODEL_FORBIDDEN');
+    });
+
     it('accepts openrouter/free community pool', () => {
       expect(isFreeModel('openrouter/free')).toBe(true);
       expect(isVerifiedFreeModel('openrouter/free')).toBe(true);
@@ -59,6 +88,8 @@ describe('PP Free-Only Policy Enforcement', () => {
       expect(isFreeModel('deepseek/deepseek-chat')).toBe(false);
       expect(() => assertFreeModel('openai/gpt-4o-mini')).toThrow('PAID_MODEL_FORBIDDEN');
       expect(() => assertVerifiedFreeModel('openai/gpt-4o-mini')).toThrow('PAID_MODEL_FORBIDDEN');
+      expect(() => assertVerifiedFreeModelForGateway('openai/gpt-4o-mini', 'openrouter')).toThrow('PAID_MODEL_FORBIDDEN');
+      expect(() => assertVerifiedFreeModelForGateway('openai/gpt-4o-mini', '9router')).toThrow('PAID_MODEL_FORBIDDEN');
     });
   });
 
