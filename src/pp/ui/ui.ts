@@ -1058,9 +1058,13 @@ async function refreshSovereignSession() {
       });
 
       if (!res.ok) {
-        setInMemoryAccessToken(null);
-        currentAuthUser = null;
-        currentAuthWorkspaces = [];
+        // Authentication error: token invalid/expired -> clear state
+        if (res.status === 401) {
+          setInMemoryAccessToken(null);
+          currentAuthUser = null;
+          currentAuthWorkspaces = [];
+        }
+        // Authorization error (403) or server error (500) -> do NOT clear auth session
         return null;
       }
 
@@ -1071,7 +1075,7 @@ async function refreshSovereignSession() {
       }
       return null;
     } catch {
-      setInMemoryAccessToken(null);
+      // Network failure: do not purge auth session immediately
       return null;
     }
   })().finally(() => {

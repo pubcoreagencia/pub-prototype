@@ -142,7 +142,9 @@ export async function refreshSession(): Promise<string | null> {
       });
 
       if (!response.ok) {
-        clearAuthSession();
+        if (response.status === 401) {
+          clearAuthSession();
+        }
         return null;
       }
 
@@ -153,7 +155,6 @@ export async function refreshSession(): Promise<string | null> {
       }
       return null;
     } catch {
-      clearAuthSession();
       return null;
     }
   })().finally(() => {

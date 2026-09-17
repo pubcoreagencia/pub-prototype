@@ -5,6 +5,7 @@
 export const ALLOWED_ORIGINS: ReadonlySet<string> = new Set([
   'https://pubcore.site',
   'https://api.pubcore.site',
+  'https://pp-api-production-24bc.up.railway.app',
   'http://localhost:3000',
   'http://localhost:3001',
   'http://localhost:5173',

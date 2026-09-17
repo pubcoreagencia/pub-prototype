@@ -237,6 +237,11 @@ export class AuthService {
 
       const userRole = await this.authorizeSession(user.id, sessionId);
       if (!userRole || ROLE_HIERARCHY[userRole] < ROLE_HIERARCHY[minRole]) {
+        if (!session.projectId) {
+          return res.status(403).json({
+            error: `Forbidden: Session ${sessionId} has no associated project or workspace`,
+          });
+        }
         return res.status(403).json({
           error: `Forbidden: Requires ${minRole} permission for this session, but current role is ${userRole || 'NONE'}`,
         });

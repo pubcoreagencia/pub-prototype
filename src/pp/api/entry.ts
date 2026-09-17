@@ -185,8 +185,43 @@ export const createPpApp = (
   // POST /prototype/sessions
   app.post('/prototype/sessions', sessionRateLimiter, async (req, res, next) => {
     try {
-      const { project, repository, branch, projectId } = req.body ?? {};
+      let { project, repository, branch, projectId } = req.body ?? {};
       if (!project) return res.status(400).json({ error: 'project is required' });
+
+      // If user is authenticated, ensure project is linked to their workspace if not explicitly provided
+      if (!projectId) {
+        const authHeader = (req.headers.authorization || req.headers['x-auth-token']) as string | string[] | undefined;
+        const token = Array.isArray(authHeader) ? authHeader[0] : authHeader;
+        if (token) {
+          try {
+            const user = await authService.verifyToken(token);
+            if (user) {
+              const workspaces = await protoRepo.listWorkspaces(user.id);
+              if (workspaces && workspaces.length > 0) {
+                const targetWs = workspaces[0];
+                const existingProjects = await protoRepo.listProjects(targetWs.id);
+                const matched = existingProjects.find(p => p.name === project);
+                if (matched) {
+                  projectId = matched.id;
+                } else {
+                  const sanitizedProject = project.replace(/[^a-zA-Z0-9-_]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+                  const initialBranch = branch ?? `prototype/${sanitizedProject || 'untitled'}/${crypto.randomUUID()}`;
+                  const createdProj = await protoRepo.createProject({
+                    workspaceId: targetWs.id,
+                    name: project,
+                    githubRepository: repository || defaultPrototypeRepository,
+                    githubBranch: initialBranch,
+                  });
+                  projectId = createdProj.id;
+                }
+              }
+            }
+          } catch (authErr: any) {
+            console.warn('[PP API] Non-fatal error determining user workspace for session:', authErr.message);
+          }
+        }
+      }
+
       const session = await protoRepo.createSession({
         projectId,
         project,
