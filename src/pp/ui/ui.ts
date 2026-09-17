@@ -1911,11 +1911,34 @@ async function loadSession(id) {
   // Load preview or set error state based on session status
   const nativePreviewUrl = '/prototype/sessions/' + encodeURIComponent(sessionId) + '/preview/';
   if (data.session.status === 'FAILED') {
+    const lastTask = (data.tasks || []).slice().reverse().find(t => t.status === 'FAILED') || (data.tasks || [])[0];
+    const taskErr = (lastTask?.error || '').toLowerCase();
+    const taskResult = lastTask?.result || {};
+    let errTitle = 'Falha na geração';
+    let errDesc = 'A geração deste protótipo falhou. Envie uma nova instrução pelo chat para tentar novamente.';
+
+    if (taskResult?.finalize?.errorCode === 'BUILD_FAILED' || taskErr.includes('build failed') || taskErr.includes('compilação')) {
+      errTitle = 'Compilação com falha';
+      errDesc = lastTask?.error || 'A compilação do código gerado falhou.';
+    } else if (taskErr.includes('timeout') || taskErr.includes('timed out') || taskResult?.errorCode === 'IDLE_TIMEOUT') {
+      errTitle = 'Tempo limite excedido';
+      errDesc = 'Os modelos de IA não responderam a tempo. Envie uma nova instrução pelo chat.';
+    } else if (taskResult?.errorCode === 'ALL_PROVIDERS_FAILED' || taskErr.includes('model_routing_exhausted')) {
+      errTitle = 'Modelos indisponíveis';
+      errDesc = 'Todos os modelos configurados falharam ou estão indisponíveis.';
+    } else if (taskErr.includes('auth') || taskErr.includes('unauthorized')) {
+      errTitle = 'Falha de autenticação';
+      errDesc = 'Erro de credencial ou permissão ao executar o agente.';
+    } else if (lastTask?.error) {
+      errDesc = lastTask.error;
+    }
+
     showPreviewError({
-      title: 'Compilação com falha',
-      desc: 'A geração deste protótipo falhou. Envie uma nova instrução pelo chat para tentar novamente.',
+      title: errTitle,
+      desc: errDesc,
     });
   } else if (data.session.status === 'VERIFYING') {
+
     setPreviewState('loading');
     $('previewStatusLabel').textContent = 'Verificando integridade (V0..V5)...';
     renderPreview(nativePreviewUrl);

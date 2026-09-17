@@ -86,7 +86,7 @@ export class OpenRouterProvider implements AgentProvider {
     apiKey?: string,
     timeoutMs = Number(process.env.OPENROUTER_TIMEOUT_MS ?? 900000),
     modelOverride?: string,
-    enableStream = process.env.OPENROUTER_STREAM_ENABLED === 'true',
+    enableStream = process.env.OPENROUTER_STREAM_ENABLED !== 'false',
     consumer?: StreamConsumer,
   ) {
     this.baseUrl = normalizeBaseUrl(baseUrl, DEFAULT_OPENROUTER_BASE_URL);
@@ -122,7 +122,12 @@ export class OpenRouterProvider implements AgentProvider {
       buildSystemPrompt(workspace, task),
       buildUserPrompt(task),
     ];
-    const cfg: OpenRouterConfig = loadOpenRouterConfig(this.model || undefined, task);
+    // Prioritize explicit modelOverride on task (e.g. from Worker per-attempt fallback loop),
+    // falling back to constructor override or configured default model.
+    const effectiveModelOverride = ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim())
+      ? task.modelOverride.trim()
+      : (this.model || undefined);
+    const cfg: OpenRouterConfig = loadOpenRouterConfig(effectiveModelOverride, task);
     const modelQueue = [cfg.primaryModel, ...cfg.fallbackModels];
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -146,15 +151,27 @@ export class OpenRouterProvider implements AgentProvider {
     // Ordered list of model identifiers that will be attempted (one entry per candidate model)
     const modelAttempts: string[] = [];
 
-    const candidateEntries = cfg.candidateModels || modelQueue.map(m => {
-      const isFree = m.includes(':free') || m.endsWith('/free');
-      return {
-        model: m,
-        tier: m === 'openrouter/free' ? 2 : isFree ? 1 : 3,
-        free: isFree,
-        maxRetries: cfg.maxRetries,
-      };
-    });
+    // When an explicit modelOverride is provided for this attempt, execute strictly that candidate
+    // to prevent duplicate routing or unexpected candidate resets inside the provider.
+    const candidateEntries = ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim())
+      ? [
+          {
+            model: task.modelOverride.trim(),
+            tier: (task.modelOverride.includes(':free') || task.modelOverride.endsWith('/free')) ? (1 as const) : (3 as const),
+            free: task.modelOverride.includes(':free') || task.modelOverride.endsWith('/free'),
+            maxRetries: 1,
+          },
+        ]
+      : (cfg.candidateModels || modelQueue.map(m => {
+          const isFree = m.includes(':free') || m.endsWith('/free');
+          return {
+            model: m,
+            tier: m === 'openrouter/free' ? (2 as const) : isFree ? (1 as const) : (3 as const),
+            free: isFree,
+            maxRetries: cfg.maxRetries,
+          };
+        }));
+
 
     try {
       while (toolRounds < this.maxToolRounds) {

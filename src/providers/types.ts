@@ -60,8 +60,11 @@ export interface ProviderTaskInput {
   systemInstructions?: string[];
   /** Optional task routing profile explicitly provided by caller (e.g., 'fast_prototype') */
   routingProfile?: TaskRoutingProfile;
+  /** Explicit model override requested for this execution attempt */
+  modelOverride?: string;
   [key: string]: unknown;
 }
+
 
 export interface AgentProvider {
   readonly kind: ProviderKind;
