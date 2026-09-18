@@ -1,0 +1,154 @@
+name: PP Gateway Production Proof
+
+on:
+  push:
+    paths:
+      - ".github/workflows/pp-gateway-production-proof.yml"
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Run production proof
+        env:
+          PP_API: https://pp-api-production-24bc.up.railway.app
+        run: |
+          node <<'NODE'
+          const API = process.env.PP_API;
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+          async function req(path, opts = {}) {
+            const res = await fetch(API + path, {
+              ...opts,
+              headers: { "content-type": "application/json", ...(opts.headers || {}) }
+            });
+            const body = await res.text();
+            let data;
+            try { data = body ? JSON.parse(body) : null; } catch { data = { raw: body }; }
+            return { status: res.status, data };
+          }
+
+          function log(obj) {
+            console.log(JSON.stringify(obj));
+          }
+
+          async function waitTask(sessionId, taskId, timeoutMs = 900000) {
+            const started = Date.now();
+            while (Date.now() - started < timeoutMs) {
+              const r = await req('/prototype/sessions/' + sessionId);
+              const task = (r.data?.tasks || []).find(t => t.id === taskId);
+              if (task && ['COMPLETED', 'FAILED', 'CANCELLED'].includes(task.status)) return task;
+              await sleep(3000);
+            }
+            return { id: taskId, status: 'TIMEOUT' };
+          }
+
+          async function runTask(token, sessionId, label, modelOverride, prompt) {
+            const r = await req('/prototype/sessions/' + sessionId + '/prompts', {
+              method: 'POST',
+              headers: { authorization: 'Bearer ' + token },
+              body: JSON.stringify({
+                objective: 'PP Dual Gateway Production Proof',
+                prompt: JSON.stringify({ modelOverride, prompt })
+              })
+            });
+            const taskId = r.data?.task?.id || r.data?.id || null;
+            log({ stage: 'TASK_CREATED', label, httpStatus: r.status, taskId });
+            if (r.status !== 202 || !taskId) return { label, createStatus: r.status, taskId };
+            const task = await waitTask(sessionId, taskId);
+            log({
+              stage: 'TASK_RESULT',
+              label,
+              taskId: task.id,
+              status: task.status,
+              error: task.error || null,
+              commitSha: task.commitSha || null,
+              provider: task.result?.provider || null,
+              model: task.result?.model || null,
+              durationMs: task.result?.durationMs || null,
+            });
+            return task;
+          }
+
+          const suffix = Date.now();
+          const email = 'pp-proof-' + suffix + '@pubcore.test';
+          const password = 'PPProof!' + suffix + 'aZ9';
+
+          let r = await req('/prototype/auth/signup', {
+            method: 'POST',
+            body: JSON.stringify({ email, password, name: 'PP Gateway Proof' })
+          });
+          log({ stage: 'SIGNUP', httpStatus: r.status, userId: r.data?.user?.id || null });
+          if (r.status !== 201) process.exit(2);
+
+          const token = r.data.accessToken;
+
+          r = await req('/prototype/auth/workspaces', {
+            method: 'POST',
+            headers: { authorization: 'Bearer ' + token },
+            body: JSON.stringify({
+              name: 'PP Gateway Proof Workspace',
+              slug: 'pp-gateway-proof-' + suffix
+            })
+          });
+          log({ stage: 'WORKSPACE', httpStatus: r.status, workspaceId: r.data?.id || null });
+          if (r.status !== 201) process.exit(3);
+          const workspaceId = r.data.id;
+
+          r = await req('/api/workspaces/' + workspaceId + '/projects', {
+            method: 'POST',
+            headers: { authorization: 'Bearer ' + token },
+            body: JSON.stringify({ name: 'PP Gateway Proof Project' })
+          });
+          log({ stage: 'PROJECT', httpStatus: r.status, projectId: r.data?.id || null });
+          if (r.status !== 201) process.exit(4);
+          const projectId = r.data.id;
+
+          r = await req('/prototype/sessions', {
+            method: 'POST',
+            body: JSON.stringify({ project: 'PP Gateway Proof Project', projectId })
+          });
+          log({ stage: 'SESSION', httpStatus: r.status, sessionId: r.data?.id || null });
+          if (r.status !== 201) process.exit(5);
+          const sessionId = r.data.id;
+
+          await runTask(
+            token, sessionId, 'OPENROUTER_REAL',
+            'cohere/north-mini-code:free',
+            'Create a minimal index.html with H1 "PP OpenRouter Proof".'
+          );
+
+          await runTask(
+            token, sessionId, '9ROUTER_REAL',
+            'kc/cohere/north-mini-code:free',
+            'Create a minimal index.html with H1 "PP 9router Proof".'
+          );
+
+          await runTask(
+            token, sessionId, 'UNVERIFIED_FREE_BLOCK',
+            'minimax/minimax-m2.7:free',
+            'This task must never execute because this model is unverified.'
+          );
+
+          await runTask(
+            token, sessionId, 'PAID_BLOCK',
+            'openai/gpt-4o-mini',
+            'This task must never execute because paid models are forbidden in PP.'
+          );
+
+          r = await req('/prototype/sessions/' + sessionId);
+          log({
+            stage: 'FINAL_SESSION',
+            httpStatus: r.status,
+            sessionId,
+            tasks: (r.data?.tasks || []).map(t => ({
+              id: t.id,
+              status: t.status,
+              error: t.error || null,
+              commitSha: t.commitSha || null,
+              provider: t.result?.provider || null,
+              model: t.result?.model || null
+            }))
+          });
+          NODE
