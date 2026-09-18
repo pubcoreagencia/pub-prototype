@@ -1,0 +1,25 @@
+name: PP 9router Existing Task Diagnostics
+
+on:
+  push:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read existing production task
+        run: |
+          node <<'NODE'
+          const url = 'https://pp-api-production-24bc.up.railway.app/prototype/sessions/bfb22b94-e855-4850-8770-078b32ec23b0';
+          const res = await fetch(url);
+          const data = await res.json();
+          const tasks = (data.tasks || []).filter(t => t.result?.provider === '9router' || t.result?.model === 'kc/cohere/north-mini-code:free');
+          console.log(JSON.stringify(tasks.map(t => ({
+            id:t.id,status:t.status,error:t.error||null,
+            provider:t.result?.provider||null,model:t.result?.model||null,
+            errorCode:t.result?.errorCode||null,errorMessage:t.result?.errorMessage||null,
+            httpStatus:t.result?.httpStatus||null,stderr:t.result?.stderr||null,
+            toolCalls:t.result?.toolCalls||null,toolRounds:t.result?.toolRounds||null
+          })), null, 2));
+          NODE
