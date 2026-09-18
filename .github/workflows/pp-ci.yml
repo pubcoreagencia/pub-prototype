@@ -2,13 +2,6 @@ name: PP CI Proof
 
 on:
   push:
-    paths:
-      - "src/**"
-      - "tests/**"
-      - "package.json"
-      - "package-lock.json"
-      - "tsconfig.json"
-      - "vitest.config.ts"
 
 jobs:
   ci:
