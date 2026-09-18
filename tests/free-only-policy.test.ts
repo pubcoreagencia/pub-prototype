@@ -9,6 +9,7 @@ import {
 } from '../src/routing/registry.js';
 import { buildRoutingPolicy, resolveCandidateModels } from '../src/routing/engine.js';
 import { OpenRouterProvider } from '../src/providers/openrouter.js';
+import { RouterProvider } from '../src/providers/router.js';
 import type { ProviderTaskInput } from '../src/providers/types.js';
 
 describe('PP Free-Only Policy Enforcement', () => {
@@ -149,6 +150,66 @@ describe('PP Free-Only Policy Enforcement', () => {
       expect(modelNames).toContain('cohere/north-mini-code:free');
       expect(modelNames).toContain('openrouter/free');
       expect(modelNames).not.toContain('openai/gpt-4o-mini');
+    });
+  });
+
+  describe('4. Provider internal fallback isolation', () => {
+    it('OpenRouterProvider does not open an internal fallback queue when modelOverride is explicit', async () => {
+      const previousFallback = process.env.OPENROUTER_FALLBACK_MODELS;
+      const previousRetries = process.env.OPENROUTER_MAX_RETRIES;
+      process.env.OPENROUTER_FALLBACK_MODELS = 'qwen/qwen3.8-27b:free';
+      process.env.OPENROUTER_MAX_RETRIES = '1';
+      const requestedModels: string[] = [];
+      global.fetch = vi.fn().mockImplementation(async (_url, init) => {
+        requestedModels.push(JSON.parse(init.body as string).model);
+        return new Response(JSON.stringify({ error: { message: 'controlled failure' } }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      try {
+        const provider = new OpenRouterProvider('https://openrouter.test/v1', 'sk-test-key', 5000, 'cohere/north-mini-code:free', false);
+        const result = await provider.execute(
+          { id: 'nested-or', objective: 'test', prompt: 'test', modelOverride: 'cohere/north-mini-code:free' },
+          '/tmp'
+        );
+        expect(result.status).toBe('ROUTER_HTTP_ERROR');
+        expect(requestedModels).toEqual(['cohere/north-mini-code:free']);
+      } finally {
+        if (previousFallback === undefined) delete process.env.OPENROUTER_FALLBACK_MODELS;
+        else process.env.OPENROUTER_FALLBACK_MODELS = previousFallback;
+        if (previousRetries === undefined) delete process.env.OPENROUTER_MAX_RETRIES;
+        else process.env.OPENROUTER_MAX_RETRIES = previousRetries;
+      }
+    });
+
+    it('RouterProvider does not open an internal fallback queue when modelOverride is explicit', async () => {
+      const previousFallback = process.env.ROUTER_FALLBACK_MODELS;
+      const previousRetries = process.env.ROUTER_MAX_RETRIES;
+      process.env.ROUTER_FALLBACK_MODELS = 'kc/nvidia/nemotron-3-super-120b-a12b:free';
+      process.env.ROUTER_MAX_RETRIES = '1';
+      const requestedModels: string[] = [];
+      global.fetch = vi.fn().mockImplementation(async (_url, init) => {
+        requestedModels.push(JSON.parse(init.body as string).model);
+        return new Response(JSON.stringify({ error: { message: 'controlled failure' } }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      try {
+        const provider = new RouterProvider('https://9router.test/v1', 'test-key', 5000, 'kc/cohere/north-mini-code:free', false);
+        const result = await provider.execute(
+          { id: 'nested-9r', objective: 'test', prompt: 'test', modelOverride: 'kc/cohere/north-mini-code:free' },
+          '/tmp'
+        );
+        expect(result.status).toBe('ROUTER_HTTP_ERROR');
+        expect(requestedModels).toEqual(['kc/cohere/north-mini-code:free']);
+      } finally {
+        if (previousFallback === undefined) delete process.env.ROUTER_FALLBACK_MODELS;
+        else process.env.ROUTER_FALLBACK_MODELS = previousFallback;
+        if (previousRetries === undefined) delete process.env.ROUTER_MAX_RETRIES;
+        else process.env.ROUTER_MAX_RETRIES = previousRetries;
+      }
     });
   });
 

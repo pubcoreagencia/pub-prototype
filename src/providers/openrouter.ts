@@ -6,7 +6,7 @@ import { ToolRuntime } from '../tools/runtime.js';
 import { AgentExecutor } from '../executor.js';
 import type { ToolCall, ToolResult, ToolExecutionContext, ToolDefinition } from '../tools/types.js';
 import { loadOpenRouterConfig, type OpenRouterConfig } from './openrouterConfig.js';
-import { canUsePaidFallback, isFreeModel, isVerifiedFreeModel } from '../routing/index.js';
+import { canUsePaidFallback, isFreeModel, isVerifiedFreeModel, isVerifiedFreeModelForGateway } from '../routing/index.js';
 import { parseOpenAISSEStream, type StreamConsumer, StreamEventSink } from './streaming/index.js';
 
 
@@ -95,7 +95,7 @@ export class OpenRouterProvider implements AgentProvider {
     this.timeoutMs = timeoutMs;
     this.maxToolRounds = Number(process.env.OPENROUTER_MAX_TOOL_ROUNDS ?? 20);
     this.maxToolCalls = Number(process.env.OPENROUTER_MAX_TOOL_CALLS ?? 50);
-    this.model = modelOverride ?? process.env.OPENROUTER_MODEL ?? (this.apiKey ? 'anthropic/claude-3.5-haiku' : 'openrouter/free');
+    this.model = modelOverride ?? process.env.OPENROUTER_MODEL ?? 'openrouter/free';
     this.enableStream = enableStream;
     this.consumer = consumer;
   }
@@ -125,11 +125,16 @@ export class OpenRouterProvider implements AgentProvider {
     ];
     // Prioritize explicit modelOverride on task (e.g. from Worker per-attempt fallback loop),
     // falling back to constructor override or configured default model.
-    const effectiveModelOverride = ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim())
+    const hasExplicitModelOverride = ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim());
+    const effectiveModelOverride = hasExplicitModelOverride
       ? task.modelOverride.trim()
       : (this.model || undefined);
     const cfg: OpenRouterConfig = loadOpenRouterConfig(effectiveModelOverride, task);
-    const modelQueue = [cfg.primaryModel, ...cfg.fallbackModels];
+    // GatewayRouter owns cross-gateway fallback. An explicit modelOverride is a single authoritative candidate.
+    const configuredModelQueue = hasExplicitModelOverride
+      ? [cfg.primaryModel]
+      : [cfg.primaryModel, ...cfg.fallbackModels];
+    const modelQueue = configuredModelQueue.filter(model => isVerifiedFreeModelForGateway(model, 'openrouter'));
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     if (options?.signal) {
@@ -175,7 +180,7 @@ export class OpenRouterProvider implements AgentProvider {
         };
       }
 
-      if (!isVerifiedFreeModel(overrideModel)) {
+      if (!isVerifiedFreeModelForGateway(overrideModel, 'openrouter')) {
         clearTimeout(timer);
         return {
           status: 'FAILED',
@@ -216,7 +221,7 @@ export class OpenRouterProvider implements AgentProvider {
           };
         }));
 
-    const candidateEntries = rawCandidateEntries.filter(entry => isFreeModel(entry.model));
+    const candidateEntries = rawCandidateEntries.filter(entry => isVerifiedFreeModelForGateway(entry.model, 'openrouter'));
 
     if (candidateEntries.length === 0) {
       clearTimeout(timer);
@@ -296,7 +301,7 @@ export class OpenRouterProvider implements AgentProvider {
                     const isLastModel = model === candidateEntries[candidateEntries.length - 1].model;
                     if (isLastModel) {
                       clearTimeout(timer);
-                      const hasFallbacks = cfg.fallbackModels && cfg.fallbackModels.length > 0;
+                      const hasFallbacks = candidateEntries.length > 1;
                       return {
                         status: 'ROUTER_HTTP_ERROR',
                         provider: this.kind,
@@ -363,7 +368,7 @@ export class OpenRouterProvider implements AgentProvider {
                 const isLastModel = model === candidateEntries[candidateEntries.length - 1].model;
                 if (isLastModel) {
                   clearTimeout(timer);
-                  const hasFallbacks = cfg.fallbackModels && cfg.fallbackModels.length > 0;
+                  const hasFallbacks = candidateEntries.length > 1;
                   const isAuth = response.status === 401 || response.status === 403;
                   const isRateLimit = response.status === 429;
                   const isServerError = response.status >= 500;

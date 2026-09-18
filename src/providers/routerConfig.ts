@@ -11,7 +11,7 @@ export interface RouterConfig {
 }
 
 export function loadRouterConfig(modelOverride?: string): RouterConfig {
-  const primary = modelOverride?.trim() || process.env.ROUTER_MODEL?.trim() || 'gemini/gemini-3.5-flash-lite';
+  const primary = modelOverride?.trim() || process.env.ROUTER_MODEL?.trim() || 'kc/cohere/north-mini-code:free';
   if (!primary) {
     throw new Error('ROUTER_MODEL must be defined in the environment');
   }

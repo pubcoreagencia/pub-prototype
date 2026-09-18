@@ -1,6 +1,7 @@
 import type { Task } from '../domain.js';
 import type { AgentProvider, ProviderTaskInput, ProviderTaskResult } from './types.js';
 import { DEFAULT_ROUTER_BASE_URL, normalizeBaseUrl, NEUTRAL_TOOL_INSTRUCTIONS } from './shared.js';
+import { isVerifiedFreeModelForGateway } from '../routing/registry.js';
 import { ToolRuntime } from '../tools/runtime.js';
 import { AgentExecutor } from '../executor.js';
 import type { ToolCall, ToolResult, ToolExecutionContext, ToolDefinition } from '../tools/types.js';
@@ -117,11 +118,16 @@ export class RouterProvider implements AgentProvider {
       buildSystemPrompt(workspace, task),
       buildUserPrompt(task),
     ];
-    const effectiveModel = ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim())
+    const hasExplicitModelOverride = ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim());
+    const effectiveModel = hasExplicitModelOverride
       ? task.modelOverride.trim()
       : (this.model || undefined);
     const cfg: RouterConfig = loadRouterConfig(effectiveModel);
-    const modelQueue = [cfg.primaryModel, ...cfg.fallbackModels];
+    // GatewayRouter owns cross-gateway fallback. An explicit modelOverride is a single authoritative candidate.
+    const configuredModelQueue = hasExplicitModelOverride
+      ? [cfg.primaryModel]
+      : [cfg.primaryModel, ...cfg.fallbackModels];
+    const modelQueue = configuredModelQueue.filter(model => isVerifiedFreeModelForGateway(model, '9router'));
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     if (options?.signal) {
@@ -182,7 +188,7 @@ export class RouterProvider implements AgentProvider {
               const isLastModel = model === modelQueue[modelQueue.length - 1];
               if (isLastModel) {
                 clearTimeout(timer);
-                const hasFallbacks = cfg.fallbackModels && cfg.fallbackModels.length > 0;
+                const hasFallbacks = modelQueue.length > 1;
                 const isAuth = response.status === 401 || response.status === 403;
                 const isRateLimit = response.status === 429;
                 const isServerError = response.status >= 500;
@@ -344,7 +350,7 @@ export class RouterProvider implements AgentProvider {
             changedFiles: runtime.getChangedFiles(),
             commit: null,
             errorCode: 'ALL_PROVIDERS_FAILED',
-            errorMessage: 'All configured models failed',
+            errorMessage: `All eligible verified 9router models failed${modelQueue.length > 1 ? ` (${modelQueue.length} candidates)` : ''}`,
             toolCalls: totalToolCalls,
             toolRounds: toolRounds,
           };
