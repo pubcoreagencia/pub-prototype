@@ -125,9 +125,12 @@ export class OpenRouterProvider implements AgentProvider {
     ];
     // Prioritize explicit modelOverride on task (e.g. from Worker per-attempt fallback loop),
     // falling back to constructor override or configured default model.
-    const hasExplicitModelOverride = ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim());
-    const effectiveModelOverride = hasExplicitModelOverride
+    const taskModelOverride = ('modelOverride' in task && typeof task.modelOverride === 'string')
       ? task.modelOverride.trim()
+      : '';
+    const hasExplicitModelOverride = taskModelOverride.length > 0;
+    const effectiveModelOverride = hasExplicitModelOverride
+      ? taskModelOverride
       : (this.model || undefined);
     const cfg: OpenRouterConfig = loadOpenRouterConfig(effectiveModelOverride, task);
     // GatewayRouter owns cross-gateway fallback. An explicit modelOverride is a single authoritative candidate.
@@ -159,7 +162,7 @@ export class OpenRouterProvider implements AgentProvider {
 
     // Check for explicit paid modelOverride rejection:
     if ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim()) {
-      const overrideModel = task.modelOverride.trim();
+      const overrideModel = taskModelOverride;
       if (!isFreeModel(overrideModel)) {
         clearTimeout(timer);
         return {
