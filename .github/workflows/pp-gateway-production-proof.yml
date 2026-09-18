@@ -44,6 +44,17 @@ jobs:
             return { id: taskId, status: 'TIMEOUT' };
           }
 
+          async function waitSessionIdle(sessionId, timeoutMs = 900000) {
+            const started = Date.now();
+            while (Date.now() - started < timeoutMs) {
+              const r = await req('/prototype/sessions/' + sessionId);
+              const status = r.data?.session?.status;
+              if (status && !['BUILDING', 'PREVIEWING', 'VERIFYING'].includes(status)) return r.data.session;
+              await sleep(3000);
+            }
+            return { id: sessionId, status: 'TIMEOUT' };
+          }
+
           async function runTask(token, sessionId, label, modelOverride, prompt) {
             const r = await req('/prototype/sessions/' + sessionId + '/prompts', {
               method: 'POST',
@@ -57,6 +68,7 @@ jobs:
             log({ stage: 'TASK_CREATED', label, httpStatus: r.status, taskId });
             if (r.status !== 202 || !taskId) return { label, createStatus: r.status, taskId };
             const task = await waitTask(sessionId, taskId);
+            await waitSessionIdle(sessionId);
             log({
               stage: 'TASK_RESULT',
               label,
@@ -138,11 +150,19 @@ jobs:
           );
 
           r = await req('/prototype/sessions/' + sessionId);
+          const proofTasks = r.data?.tasks || [];
+          const byObjective = new Map(proofTasks.map(t => [t.id, t]));
+          const completedModels = proofTasks.filter(t => t.status === 'COMPLETED').map(t => t.result?.model).filter(Boolean);
+          const errors = proofTasks.map(t => ({status:t.status,error:t.error,resultError:t.result?.errorCode||null}));
+          log({stage:'PROOF_ASSERTION_DATA',sessionId,completedModels,errors});
+
+          r = await req('/prototype/sessions/' + sessionId);
+          const finalTasks = r.data?.tasks || [];
           log({
             stage: 'FINAL_SESSION',
             httpStatus: r.status,
             sessionId,
-            tasks: (r.data?.tasks || []).map(t => ({
+            tasks: finalTasks.map(t => ({
               id: t.id,
               status: t.status,
               error: t.error || null,
@@ -151,4 +171,24 @@ jobs:
               model: t.result?.model || null
             }))
           });
+
+          const openrouter = finalTasks.find(t => t.result?.model === 'cohere/north-mini-code:free' && t.result?.provider === 'openrouter');
+          const router9 = finalTasks.find(t => t.result?.model === 'kc/cohere/north-mini-code:free' && t.result?.provider === '9router');
+          const unverified = finalTasks.find(t => t.error?.includes('UNVERIFIED_FREE_MODEL_FORBIDDEN') || t.result?.errorCode === 'UNVERIFIED_FREE_MODEL_FORBIDDEN');
+          const paid = finalTasks.find(t => t.error?.includes('PAID_MODEL_FORBIDDEN') || t.result?.errorCode === 'PAID_MODEL_FORBIDDEN');
+
+          const assertions = {
+            openrouter_real_completed: openrouter?.status === 'COMPLETED',
+            router9_real_completed: router9?.status === 'COMPLETED',
+            unverified_free_blocked: unverified?.status === 'FAILED',
+            paid_model_blocked: paid?.status === 'FAILED',
+          };
+          log({stage:'PROOF_ASSERTIONS',assertions});
+
+          if (!Object.values(assertions).every(Boolean)) {
+            console.error(JSON.stringify({stage:'PROOF_FAILED',assertions}));
+            process.exit(10);
+          }
+
+          console.log(JSON.stringify({stage:'PROOF_PASS',assertions}));
           NODE
