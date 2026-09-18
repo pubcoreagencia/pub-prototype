@@ -4,6 +4,7 @@ import {
   ROUTER_VERIFIED_FREE_MODELS,
 } from './catalog-models.js';
 
+// PP production gateway verification checkpoint
 /**
  * Centralized Model Capability Registry.
  * Contains curated metadata, supported capabilities, context windows, and profiles.
