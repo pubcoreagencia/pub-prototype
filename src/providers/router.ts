@@ -418,10 +418,10 @@ export class RouterProvider implements AgentProvider {
   private messagesToApi(messages: OpenAIChatMessage[]): Record<string, unknown>[] {
     return messages.map(msg => {
       const result: Record<string, unknown> = { role: msg.role };
-      if (msg.content !== undefined) {
-        result.content = msg.content;
-      } else if (msg.role === 'assistant' && msg.tool_calls?.length) {
+      if (msg.role === 'assistant' && msg.tool_calls?.length && (msg.content == null || msg.content === '')) {
         result.content = '';
+      } else if (msg.content !== undefined) {
+        result.content = msg.content;
       } else {
         result.content = null;
       }
