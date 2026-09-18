@@ -1497,6 +1497,10 @@ export class PostgresPrototypeRepository implements PrototypeRepository {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
         );
         ALTER TABLE prototype_sessions ADD COLUMN IF NOT EXISTS project_id UUID REFERENCES projects(id) ON DELETE CASCADE;
+        -- Idempotent runtime migration: verification pipeline uses VERIFYING session status.
+        ALTER TABLE prototype_sessions DROP CONSTRAINT IF EXISTS prototype_sessions_status_check;
+        ALTER TABLE prototype_sessions ADD CONSTRAINT prototype_sessions_status_check
+          CHECK (status IN ('CREATING','READY','BUILDING','PREVIEWING','VERIFYING','FAILED','APPROVED','PROMOTED','ARCHIVED'));
         CREATE TABLE IF NOT EXISTS prototype_checkpoint_files (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           checkpoint_id UUID NOT NULL REFERENCES prototype_checkpoints(id) ON DELETE CASCADE,
