@@ -219,9 +219,20 @@ export class PrototypeWorker {
         timestamp: new Date().toISOString(),
       }));
 
-      // SECURITY GATE: assert modelOverride is verified free before executing any work
-      if ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim()) {
-        assertVerifiedFreeModel(task.modelOverride.trim());
+      // SECURITY GATE: extract and assert modelOverride is verified free before executing any work
+      let taskModelOverride: string | undefined = undefined;
+      if ('modelOverride' in task && typeof (task as any).modelOverride === 'string' && (task as any).modelOverride.trim()) {
+        taskModelOverride = (task as any).modelOverride.trim();
+      } else if (typeof task.prompt === 'string' && task.prompt.startsWith('{')) {
+        try {
+          const parsed = JSON.parse(task.prompt);
+          if (parsed && typeof parsed.modelOverride === 'string' && parsed.modelOverride.trim()) {
+            taskModelOverride = parsed.modelOverride.trim();
+          }
+        } catch {}
+      }
+      if (taskModelOverride) {
+        assertVerifiedFreeModel(taskModelOverride);
       }
 
       await this.tasks.update(task.id, { status: 'RUNNING', workspacePath: workspace, branch });
@@ -322,8 +333,18 @@ export class PrototypeWorker {
       // PrototypeTask does not declare routingProfile; access it defensively
       const taskRoutingProfile = (task as any).routingProfile as import('../../routing/types.js').TaskRoutingProfile | undefined;
       const derivedProfile = taskRoutingProfile ?? classifyTaskProfile(task as any);
+      let cleanPrompt = task.prompt;
+      if (taskModelOverride && typeof task.prompt === 'string' && task.prompt.startsWith('{')) {
+        try {
+          const parsed = JSON.parse(task.prompt);
+          if (parsed && typeof parsed.prompt === 'string') {
+            cleanPrompt = parsed.prompt;
+          }
+        } catch {}
+      }
       const taskWithInstructions: ProviderTaskInput = {
         ...task,
+        prompt: cleanPrompt,
         systemInstructions: [...PREVIEW_SYSTEM_INSTRUCTIONS],
         routingProfile: derivedProfile,
       };
@@ -334,8 +355,8 @@ export class PrototypeWorker {
       const isDualGateway = (this.provider as any).kind === 'dual-gateway' || typeof (this.provider as any).getGateway === 'function';
 
       const candidateModels = (() => {
-        if ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim() && isVerifiedFreeModel(task.modelOverride)) {
-          const override = task.modelOverride.trim();
+        if (taskModelOverride && isVerifiedFreeModel(taskModelOverride)) {
+          const override = taskModelOverride;
           const targetGateway: GatewayKind = isVerifiedFreeModelForGateway(override, '9router') ? '9router' : 'openrouter';
           return [{ gateway: targetGateway, model: override, free: true as const, tier: 1 }];
         }
