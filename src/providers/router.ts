@@ -118,9 +118,12 @@ export class RouterProvider implements AgentProvider {
       buildSystemPrompt(workspace, task),
       buildUserPrompt(task),
     ];
-    const hasExplicitModelOverride = ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim());
-    const effectiveModel = hasExplicitModelOverride
+    const taskModelOverride = ('modelOverride' in task && typeof task.modelOverride === 'string')
       ? task.modelOverride.trim()
+      : '';
+    const hasExplicitModelOverride = taskModelOverride.length > 0;
+    const effectiveModel = hasExplicitModelOverride
+      ? taskModelOverride
       : (this.model || undefined);
     const cfg: RouterConfig = loadRouterConfig(effectiveModel);
     // GatewayRouter owns cross-gateway fallback. An explicit modelOverride is a single authoritative candidate.
