@@ -190,5 +190,20 @@ jobs:
             process.exit(10);
           }
 
+          const nineRouterTask = finalTasks.find(t => t.id === '0381d6a3-0587-4d0c-a7fe-0f2ad1341391');
+          log({
+            stage: 'NINE_ROUTER_DIAGNOSTICS',
+            taskId: nineRouterTask?.id || null,
+            status: nineRouterTask?.status || null,
+            provider: nineRouterTask?.result?.provider || null,
+            model: nineRouterTask?.result?.model || null,
+            errorCode: nineRouterTask?.result?.errorCode || null,
+            errorMessage: nineRouterTask?.result?.errorMessage || null,
+            httpStatus: nineRouterTask?.result?.httpStatus || null,
+            toolCalls: nineRouterTask?.result?.toolCalls || null,
+            toolRounds: nineRouterTask?.result?.toolRounds || null,
+            stderr: nineRouterTask?.result?.stderr || null
+          });
+
           console.log(JSON.stringify({stage:'PROOF_PASS',assertions}));
           NODE
