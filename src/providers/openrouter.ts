@@ -161,7 +161,7 @@ export class OpenRouterProvider implements AgentProvider {
     const modelAttempts: string[] = [];
 
     // Check for explicit paid modelOverride rejection:
-    if ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim()) {
+    if (hasExplicitModelOverride) {
       const overrideModel = taskModelOverride;
       if (!isFreeModel(overrideModel)) {
         clearTimeout(timer);
