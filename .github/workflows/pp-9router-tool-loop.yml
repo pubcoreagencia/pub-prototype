@@ -92,3 +92,5 @@ jobs:
             commitSha:task.commitSha||null
           }));
           NODE
+
+# rerun after worker diagnostic deploy
