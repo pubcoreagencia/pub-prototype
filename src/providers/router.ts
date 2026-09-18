@@ -342,6 +342,9 @@ export class RouterProvider implements AgentProvider {
             break;
           }
         }
+        // A successful tool-call response starts the next tool round with the same model queue.
+        if (modelFound) break;
+
         // If this is the last model (including fallbacks) and all attempts failed, return FAILED
         if (model === modelQueue[modelQueue.length - 1]) {
           clearTimeout(timer);
