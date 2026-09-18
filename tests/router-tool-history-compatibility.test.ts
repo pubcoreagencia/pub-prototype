@@ -80,6 +80,7 @@ describe('9router tool-history compatibility', () => {
     };
 
     const result = await provider.execute(task, workspace);
+    console.log('ROUTER_COMPAT_DIAGNOSTIC', JSON.stringify({ status: result.status, errorCode: result.errorCode, errorMessage: result.errorMessage, requests: requests.map(r => ({ model: r.model, messages: r.messages })) }));
 
     expect(result.status).toBe('COMPLETED');
     expect(requests).toHaveLength(2);
