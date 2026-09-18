@@ -117,7 +117,10 @@ export class RouterProvider implements AgentProvider {
       buildSystemPrompt(workspace, task),
       buildUserPrompt(task),
     ];
-    const cfg: RouterConfig = loadRouterConfig(this.model || undefined);
+    const effectiveModel = ('modelOverride' in task && typeof task.modelOverride === 'string' && task.modelOverride.trim())
+      ? task.modelOverride.trim()
+      : (this.model || undefined);
+    const cfg: RouterConfig = loadRouterConfig(effectiveModel);
     const modelQueue = [cfg.primaryModel, ...cfg.fallbackModels];
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
