@@ -150,6 +150,8 @@ export class RouterProvider implements AgentProvider {
     let lastResponseText = '';
 
     let modelFound = false;
+    let lastAttemptError: string | null = null;
+    let lastAttemptModel: string | null = null;
     try {
     while (toolRounds < this.maxToolRounds) {
       for (const model of modelQueue) {
@@ -335,6 +337,9 @@ export class RouterProvider implements AgentProvider {
             toolRounds++;
             break;
           } catch (fetchErr: any) {
+            lastAttemptModel = model;
+            const rawError = fetchErr instanceof Error ? fetchErr.message : String(fetchErr ?? 'Unknown router error');
+            lastAttemptError = rawError.replace(/Bearer\\s+[^\\s]+/gi, 'Bearer [REDACTED]');
             if (attempt < cfg.maxRetries) {
               await new Promise(r => setTimeout(r, cfg.baseDelayMs * Math.pow(2, attempt - 1) + Math.random() * 100));
               continue;
@@ -352,11 +357,13 @@ export class RouterProvider implements AgentProvider {
             exitCode: null,
             durationMs: Date.now() - started,
             stdout: finalMessage,
-            stderr: 'All configured models failed',
+            stderr: lastAttemptError
+              ? `All configured models failed: ${lastAttemptError}`
+              : 'All configured models failed',
             changedFiles: runtime.getChangedFiles(),
             commit: null,
             errorCode: 'ALL_PROVIDERS_FAILED',
-            errorMessage: `All eligible verified 9router models failed${modelQueue.length > 1 ? ` (${modelQueue.length} candidates)` : ''}`,
+            errorMessage: `All eligible verified 9router models failed${modelQueue.length > 1 ? ` (${modelQueue.length} candidates)` : ''}${lastAttemptModel ? `; last model=${lastAttemptModel}` : ''}${lastAttemptError ? `; error=${lastAttemptError}` : ''}`,
             toolCalls: totalToolCalls,
             toolRounds: toolRounds,
           };
