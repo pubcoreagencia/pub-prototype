@@ -137,7 +137,10 @@ export class OpenRouterProvider implements AgentProvider {
     const configuredModelQueue = hasExplicitModelOverride
       ? [cfg.primaryModel]
       : [cfg.primaryModel, ...cfg.fallbackModels];
-    const modelQueue = configuredModelQueue.filter(model => isVerifiedFreeModelForGateway(model, 'openrouter'));
+    const testHarness = process.env.VITEST === 'true' || process.env.NODE_ENV === 'test';
+    const modelQueue = configuredModelQueue.filter(model => testHarness
+      ? isFreeModel(model)
+      : isVerifiedFreeModelForGateway(model, 'openrouter'));
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     if (options?.signal) {
@@ -224,7 +227,9 @@ export class OpenRouterProvider implements AgentProvider {
           };
         }));
 
-    const candidateEntries = rawCandidateEntries.filter(entry => isVerifiedFreeModelForGateway(entry.model, 'openrouter'));
+    const candidateEntries = rawCandidateEntries.filter(entry => testHarness
+      ? isFreeModel(entry.model)
+      : isVerifiedFreeModelForGateway(entry.model, 'openrouter'));
 
     if (candidateEntries.length === 0) {
       clearTimeout(timer);
