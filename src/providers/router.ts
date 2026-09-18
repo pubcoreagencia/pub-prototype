@@ -424,9 +424,12 @@ export class RouterProvider implements AgentProvider {
   private messagesToApi(messages: OpenAIChatMessage[]): Record<string, unknown>[] {
     return messages.map(msg => {
       const result: Record<string, unknown> = { role: msg.role };
-      // Always include content — null when not present (required by Gemini via 9Router)
+      // Tool-call assistant turns use an empty string rather than null for
+      // Kilo-compatible OpenAI endpoints that reject content:null on tool calls.
       if (msg.content !== undefined) {
         result.content = msg.content;
+      } else if (msg.role === 'assistant' && msg.tool_calls?.length) {
+        result.content = '';
       } else {
         result.content = null;
       }
