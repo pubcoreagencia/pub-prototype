@@ -21,3 +21,5 @@ jobs:
             sleep 5
           done
           exit 2
+
+# recheck production database schema
