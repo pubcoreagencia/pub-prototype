@@ -71,8 +71,8 @@ jobs:
             body:JSON.stringify({
               objective:'PP 9router real tool-loop diagnostic',
               prompt:JSON.stringify({
-                modelOverride:'kc/cohere/north-mini-code:free',
-                prompt:'Create a file named index.html containing exactly: <h1>PP_9ROUTER_TOOL_OK</h1>. Use the file-writing tool exactly once. After the tool succeeds, reply briefly with PP_9ROUTER_TOOL_DONE.'
+                modelOverride:'kc/kilo-auto/free',
+                prompt:'Create a file named index.html containing exactly: <h1>PP_9ROUTER_ALT_OK</h1>. Use the file-writing tool exactly once. After the tool succeeds, reply briefly with PP_9ROUTER_ALT_DONE.'
               })
             })
           });
