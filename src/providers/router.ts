@@ -1,7 +1,7 @@
 import type { Task } from '../domain.js';
 import type { AgentProvider, ProviderTaskInput, ProviderTaskResult } from './types.js';
 import { DEFAULT_ROUTER_BASE_URL, normalizeBaseUrl, NEUTRAL_TOOL_INSTRUCTIONS } from './shared.js';
-import { isVerifiedFreeModelForGateway } from '../routing/registry.js';
+import { isFreeModel, isVerifiedFreeModelForGateway } from '../routing/registry.js';
 import { ToolRuntime } from '../tools/runtime.js';
 import { AgentExecutor } from '../executor.js';
 import type { ToolCall, ToolResult, ToolExecutionContext, ToolDefinition } from '../tools/types.js';
