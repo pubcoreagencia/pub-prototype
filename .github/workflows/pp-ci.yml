@@ -16,6 +16,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: git config --global user.name "PP CI Test" && git config --global user.email "ci@pubcore.test"
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
